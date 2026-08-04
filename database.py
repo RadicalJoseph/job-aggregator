@@ -64,13 +64,12 @@ def update_job_status(url: str, status: str) -> None:
         conn.commit()
 
 def get_recent_jobs(limit: int = 200) -> List[Tuple]:
-    """Retrieve only 'New' records for inspection in the GUI."""
+    """Retrieve recent records including their current status."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-        SELECT title, company, source, location, salary, discovered_at, url 
+        SELECT title, company, source, location, salary, discovered_at, url, status 
         FROM jobs 
-        WHERE status = 'New'
         ORDER BY discovered_at DESC 
         LIMIT ?
         """, (limit,))

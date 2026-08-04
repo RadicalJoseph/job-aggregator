@@ -14,10 +14,19 @@ def read_log_file():
     except Exception as e: return f"Error reading log: {e}"
 
 def refresh_data(tree, text_widget):
-    for row in tree.get_children(): tree.delete(row)
+    for row in tree.get_children(): 
+        tree.delete(row)
+        
     for job in database.get_recent_jobs():
-        # Append empty checkbox symbols to the standard database row
-        row_data = list(job) + ["☐", "☐", "☐"]
+        # job tuple layout: (title, company, source, location, salary, discovered_at, url, status)
+        title, company, source, location, salary, discovered, url, status = job
+        
+        # Determine checkmark visual state based on recorded DB status
+        applied_chk = "☑" if status == "Applied" else "☐"
+        ignored_chk = "☑" if status == "Ignored" else "☐"
+        rejected_chk = "☑" if status == "Rejected" else "☐"
+        
+        row_data = [title, company, source, location, salary, discovered, url, applied_chk, ignored_chk, rejected_chk]
         tree.insert('', tk.END, values=row_data)
         
     text_widget.config(state=tk.NORMAL)
@@ -36,7 +45,7 @@ def copy_url(event, tree):
         messagebox.showinfo("URL Copied", "The job URL has been copied to your clipboard.")
 
 def handle_single_click(event, tree, text_widget):
-    """Detects clicks on interactive checkbox columns and updates job status."""
+    """Detects clicks on status columns and updates status without removing the row."""
     region = tree.identify("region", event.x, event.y)
     if region != "cell": return
     
@@ -47,9 +56,23 @@ def handle_single_click(event, tree, text_widget):
     status_map = {'#8': 'Applied', '#9': 'Ignored', '#10': 'Rejected'}
     
     if col in status_map:
-        new_status = status_map[col]
+        clicked_status = status_map[col]
         item_values = tree.item(item, 'values')
-        url = item_values[6] 
+        url = item_values[6]
+        
+        # Toggle status: if already set to this status, reset to 'New', otherwise set to clicked status
+        current_applied = item_values[7] == "☑"
+        current_ignored = item_values[8] == "☑"
+        current_rejected = item_values[9] == "☑"
+        
+        is_currently_active = (
+            (clicked_status == 'Applied' and current_applied) or
+            (clicked_status == 'Ignored' and current_ignored) or
+            (clicked_status == 'Rejected' and current_rejected)
+        )
+        
+        new_status = 'New' if is_currently_active else clicked_status
+        
         database.update_job_status(url, new_status)
         refresh_data(tree, text_widget)
 
@@ -64,7 +87,6 @@ def main():
     tab_db = ttk.Frame(notebook)
     notebook.add(tab_db, text='Database Records')
 
-    # Reconfigured schema columns including interactive endpoints
     columns = ("Title", "Company", "Source", "Location", "Salary", "Discovered", "URL", "Applied", "Ignored", "Rejected")
     tree = ttk.Treeview(tab_db, columns=columns, show="headings")
 
@@ -87,7 +109,6 @@ def main():
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     tree.pack(expand=True, fill='both')
     
-    # Event bindings for UX logic
     tree.bind("<Double-1>", lambda e: copy_url(e, tree))
     tree.bind("<ButtonRelease-1>", lambda e: handle_single_click(e, tree, log_text))
 
@@ -100,7 +121,7 @@ def main():
     control_frame.pack(fill='x', padx=10, pady=(0, 10))
     refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: refresh_data(tree, log_text))
     refresh_btn.pack(side=tk.LEFT)
-    hint_label = ttk.Label(control_frame, text="Double-click row to copy URL | Single-click status box to filter job from future views.")
+    hint_label = ttk.Label(control_frame, text="Double-click row to copy URL | Click status box to toggle checkmark.")
     hint_label.pack(side=tk.RIGHT)
 
     refresh_data(tree, log_text)
