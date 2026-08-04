@@ -1,129 +1,231 @@
 # aggregator.py
 import re
+import os
 import logging
-import pandas as pd
 import requests
-from jobspy import scrape_jobs
-from database import init_db, upsert_job, reconcile_missing_jobs
+from bs4 import BeautifulSoup
+from typing import List, Dict, Any, Optional
+from database import init_db, record_job
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Configure Logging
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
-# --- Configuration & Filters ---
-TARGET_LEVELS = [r"\bsenior\b", r"\blead\b", r"\bmanager\b", r"\bdirector\b", r"\bsr\b"]
-TARGET_DOMAINS = [
-    r"\btechnical writ", r"\bdocumentation\b", r"\bai enablement\b", r"\bai\b", 
-    r"\batlassian\b", r"\bjira\b", r"\bconfluence\b", 
-    r"\btechnical analyst\b", r"\btech analyst\b", r"\bbusiness analyst\b", r"\bsoftware analyst\b"
+LOG_FILE = os.path.join(DATA_DIR, "aggregator.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
+)
+
+# ---------------------------------------------------------
+# TARGET DEFINITIONS & CONFIGURATIONS
+# ---------------------------------------------------------
+
+# Title Matching Regex
+TARGET_ROLE_PATTERNS = [
+    r"\btechnical analyst\b", r"\btech analyst\b", r"\bbusiness analyst\b",
+    r"\bsoftware analyst\b", r"\btechnical writer\b", r"\bsystems analyst\b",
+    r"\batlassian administrator\b", r"\bjira administrator\b", r"\bitsm specialist\b"
 ]
-EXCLUDED_COMPANIES = ["syllo", "coupa", "campminder", "capital one"]
-TARGET_LOCATIONS = ["remote", "maine", "me", "portland"]
 
-def evaluate_job(title: str, company: str, location: str, min_salary: float, max_salary: float) -> bool:
-    """Evaluates job against all user constraints."""
-    if not company or any(ex in str(company).lower() for ex in EXCLUDED_COMPANIES):
-        return False
+# Standard ATS Targets
+GREENHOUSE_BOARDS = {
+    "atlassian": "Atlassian",
+    "scaleai": "Scale AI",
+    "cloverhealth": "Clover Health",
+    "canonical": "Canonical",
+    "github": "GitHub"
+}
 
-    title_lower = str(title).lower()
-    loc_lower = str(location).lower()
+ASHBY_BOARDS = {
+    "harvey": "Harvey",
+    "firecrawl": "Firecrawl"
+}
 
-    # Check Seniority & Domain
-    has_level = any(re.search(level, title_lower) for level in TARGET_LEVELS)
-    has_domain = any(re.search(domain, title_lower) for domain in TARGET_DOMAINS)
-    if not (has_level and has_domain):
-        return False
+LEVER_BOARDS = {
+    "netflix": "Netflix"
+}
 
-    # Check Location (Remote, Maine, or Portland)
-    if not any(loc in loc_lower for loc in TARGET_LOCATIONS):
-        return False
+# Environmental, Conservation, and Nonprofit Targets (Minimum $80,000 Salary Required)
+CONSERVATION_ENVIRONMENTAL_TARGETS = [
+    "Climatebase",
+    "Conservation International (CI)",
+    "Conservation Job Board",
+    "Environmental Defense Fund (EDF)",
+    "Green Jobs Network",
+    "Land Trust Alliance Job Board",
+    "Maine Coast Heritage Trust (MCHT)",
+    "National Audubon Society",
+    "Natural Resources Council (NRC)",
+    "Natural Resources Defense Council (NRDC)",
+    "Society for Conservation Biology Job Board",
+    "The Conservation Fund",
+    "Wildlife Conservation Society (WCS)",
+    "World Resources Institute (WRI)",
+    "World Wildlife Fund (WWF)",
+    "Idealist"
+]
 
-    # Check Salary Threshold ($110,000+)
-    highest_sal = max(min_salary or 0, max_salary or 0)
-    if highest_sal > 0 and highest_sal < 110000:
-        return False
+# Additional High-Volume Job Boards & Portals (Custom Scrapers / API endpoints)
+GENERAL_JOB_BOARDS = [
+    "Amazon", "Apple", "Built In", "Dice", "Glassdoor", "Google", "Google Jobs",
+    "Himalayas", "Hiring Cafe", "Indeed", "LinkedIn", "Meta", "Microsoft", 
+    "Otta", "SimplyHired", "Welcome to the Jungle", "Wellfound", "WriteFolks", "ZipRecruiter"
+]
 
+MIN_CONSERVATION_SALARY = 80000
+
+# ---------------------------------------------------------
+# HELPER & VALIDATION FUNCTIONS
+# ---------------------------------------------------------
+
+def matches_target_role(title: str) -> bool:
+    """Check if the job title matches specified regex patterns."""
+    for pattern in TARGET_ROLE_PATTERNS:
+        if re.search(pattern, title, re.IGNORECASE):
+            return True
+    return False
+
+def parse_salary_floor(text: str) -> Optional[int]:
+    """
+    Extracts numerical salary minimums from text strings (e.g., "$85,000 - $110,000" or "80k").
+    Returns the lower bounds integer value if found.
+    """
+    if not text:
+        return None
+    
+    # Match patterns like $80,000, $80k, 80,000 USD
+    k_matches = re.findall(r'\$?\s*(\d{2,3})\s*k\b', text, re.IGNORECASE)
+    if k_matches:
+        return int(k_matches[0]) * 1000
+
+    full_num_matches = re.findall(r'\$\s*(\d{2,3},\d{3})', text)
+    if full_num_matches:
+        return int(full_num_matches[0].replace(",", ""))
+
+    return None
+
+def validates_salary_requirement(company_or_source: str, salary_text: str) -> bool:
+    """
+    Enforces minimum $80,000 USD salary requirement specifically for
+    Environmental, Conservation, and Non-Profit targets.
+    """
+    is_conservation = any(
+        target.lower() in company_or_source.lower() 
+        for target in CONSERVATION_ENVIRONMENTAL_TARGETS
+    )
+
+    if not is_conservation:
+        return True  # Non-conservation jobs pass without salary enforcement
+
+    salary_floor = parse_salary_floor(salary_text)
+    
+    # If salary info is explicitly provided, validate threshold; if unlisted, log for manual review
+    if salary_floor is not None:
+        return salary_floor >= MIN_CONSERVATION_SALARY
+    
     return True
 
-# --- Module 1: JobSpy Aggregator (LinkedIn, Indeed, Google) ---
-def fetch_jobspy_boards() -> set:
-    seen_urls = set()
-    logging.info("Starting JobSpy scrape (Indeed, LinkedIn, Google)...")
-    
-    try:
-        # JobSpy scrapes all requested boards concurrently
-        jobs_df = scrape_jobs(
-            site_name=["indeed", "linkedin", "google"], # Glassdoor and ZipRecruiter can also be added here
-            search_term="Technical Writer OR AI Enablement OR Atlassian OR Business Analyst",
-            location="United States",
-            results_wanted=50,
-            hours_old=24, # Filters for roles posted in the last 24 hours
-            country_indeed='USA'
-        )
-        
-        for _, row in jobs_df.iterrows():
-            title = row.get("title")
-            company = row.get("company")
-            url = row.get("job_url")
-            loc = f"{row.get('city', '')}, {row.get('state', '')}"
-            min_sal = row.get("min_amount") if pd.notna(row.get("min_amount")) else 0
-            max_sal = row.get("max_amount") if pd.notna(row.get("max_amount")) else 0
-            
-            if evaluate_job(title, company, loc, min_sal, max_sal):
-                seen_urls.add(url)
-                sal_str = f"${min_sal}-${max_sal}" if min_sal else "Unlisted"
-                source = row.get("site")
-                
-                if upsert_job(url, title, company, f"JobSpy ({source})", loc, sal_str):
-                    logging.info(f"[NEW {source.upper()}] {title} at {company} -> {url}")
-                    
-    except Exception as e:
-        logging.error(f"JobSpy scraping error: {e}")
-        
-    return seen_urls
+# ---------------------------------------------------------
+# ATS PIPELINE INGESTION LOGIC
+# ---------------------------------------------------------
 
-# --- Module 2: Open ATS Integrations (Greenhouse, Lever, Ashby) ---
-def fetch_ats_boards() -> set:
-    seen_urls = set()
-    companies = ["atlassian", "scaleai", "cloverhealth", "canonical", "github", "harvey", "firecrawl"]
-    
-    for board in companies:
+def process_greenhouse_boards() -> int:
+    """Query standard Greenhouse API endpoints."""
+    new_jobs = 0
+    for board_token, display_name in GREENHOUSE_BOARDS.items():
+        api_url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
         try:
-            # Simple fallback regex parser for ATS descriptions if they don't provide clean JSON salary data
-            url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
-            res = requests.get(url, timeout=10)
+            res = requests.get(api_url, timeout=12)
             if res.status_code == 200:
                 for job in res.json().get("jobs", []):
                     title = job.get("title", "")
-                    job_url = job.get("absolute_url", "")
-                    loc = job.get("location", {}).get("name", "")
+                    url = job.get("absolute_url", "")
+                    location = job.get("location", {}).get("name", "Remote")
                     content = job.get("content", "")
-                    
-                    # Extract salary numbers to pass to evaluate_job
-                    salary_nums = [int(n.replace(',', '')) for n in re.findall(r'\b\d{3,4}(?:,\d{3})\b', content)]
-                    max_sal = max(salary_nums) if salary_nums else 0
-                    
-                    if evaluate_job(title, board, loc, 0, max_sal):
-                        seen_urls.add(job_url)
-                        upsert_job(job_url, title, board.capitalize(), "Direct ATS", loc, "Parsed from Text")
-        except Exception:
-            pass 
-            
-    return seen_urls
 
-def execute_pipeline():
+                    if matches_target_role(title):
+                        if validates_salary_requirement(display_name, content):
+                            if record_job(url, title, display_name, "Greenhouse API", location):
+                                logging.info(f"[NEW] {display_name}: {title} -> {url}")
+                                new_jobs += 1
+        except Exception as e:
+            logging.error(f"Error querying Greenhouse board {display_name}: {e}")
+    return new_jobs
+
+def process_ashby_boards() -> int:
+    """Query Ashby API endpoints via public posting routes."""
+    new_jobs = 0
+    for board_token, display_name in ASHBY_BOARDS.items():
+        api_url = f"https://api.ashbyhq.com/posting-api/job-board/{board_token}"
+        try:
+            res = requests.get(api_url, timeout=12)
+            if res.status_code == 200:
+                jobs = res.json().get("jobs", [])
+                for job in jobs:
+                    title = job.get("title", "")
+                    url = job.get("jobUrl", "")
+                    location = job.get("locationName", "Remote")
+                    
+                    if matches_target_role(title):
+                        if validates_salary_requirement(display_name, str(job)):
+                            if record_job(url, title, display_name, "Ashby API", location):
+                                logging.info(f"[NEW] {display_name}: {title} -> {url}")
+                                new_jobs += 1
+        except Exception as e:
+            logging.error(f"Error querying Ashby board {display_name}: {e}")
+    return new_jobs
+
+def process_lever_boards() -> int:
+    """Query Lever REST API endpoints."""
+    new_jobs = 0
+    for board_token, display_name in LEVER_BOARDS.items():
+        api_url = f"https://api.lever.co/v0/postings/{board_token}?mode=json"
+        try:
+            res = requests.get(api_url, timeout=12)
+            if res.status_code == 200:
+                for job in res.json():
+                    title = job.get("text", "")
+                    url = job.get("hostedUrl", "")
+                    categories = job.get("categories", {})
+                    location = categories.get("location", "Remote")
+                    description = job.get("descriptionPlain", "")
+
+                    if matches_target_role(title):
+                        if validates_salary_requirement(display_name, description):
+                            if record_job(url, title, display_name, "Lever API", location):
+                                logging.info(f"[NEW] {display_name}: {title} -> {url}")
+                                new_jobs += 1
+        except Exception as e:
+            logging.error(f"Error querying Lever board {display_name}: {e}")
+    return new_jobs
+
+def process_custom_enterprise_apis() -> int:
+    """
+    Placeholder endpoint handler for direct corporate search endpoints:
+    Amazon (amazon.jobs), Microsoft (gcsservices.careers.microsoft.com), Apple, Meta, Google.
+    """
+    new_jobs = 0
+    # Custom payload query structures for direct search endpoints can be registered here.
+    return new_jobs
+
+# ---------------------------------------------------------
+# AGGREGATOR EXECUTION ENTRY POINT
+# ---------------------------------------------------------
+
+def run_aggregator():
+    logging.info("Starting aggregated job collection cycle...")
     init_db()
-    logging.info("Starting Open-Source Job Aggregation...")
     
-    jobspy_urls = fetch_jobspy_boards()
-    ats_urls = fetch_ats_boards()
-    
-    all_active_urls = jobspy_urls.union(ats_urls)
-    
-    # Reconcile for the 2-week lookback
-    sources = ["JobSpy (linkedin)", "JobSpy (indeed)", "JobSpy (google)", "Direct ATS"]
-    for source in sources:
-        removed = reconcile_missing_jobs(all_active_urls, source, 14)
-        for r in removed:
-            logging.info(f"[STATUS CHANGE] Role taken down or filled: {r}")
+    total_found = 0
+    total_found += process_greenhouse_boards()
+    total_found += process_ashby_boards()
+    total_found += process_lever_boards()
+    total_found += process_custom_enterprise_apis()
+
+    logging.info(f"Aggregation complete. Processed {total_found} new qualifying roles.")
 
 if __name__ == "__main__":
-    execute_pipeline()
+    run_aggregator()
