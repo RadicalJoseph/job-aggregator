@@ -1,76 +1,67 @@
 # database.py
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Optional, List, Tuple
 
 DB_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(DB_DIR, "jobs.db")
 
-def get_connection() -> sqlite3.Connection:
+def ensure_data_directory() -> None:
+    """Ensure the local runtime data directory exists."""
     if not os.path.exists(DB_DIR):
         os.makedirs(DB_DIR)
+
+def get_connection() -> sqlite3.Connection:
+    """Establish and return a database connection."""
+    ensure_data_directory()
     return sqlite3.connect(DB_PATH)
 
 def init_db() -> None:
-    """Initialize schema with status tracking for the 2-week lookback."""
+    """Initialize the SQLite schema if it does not already exist."""
     with get_connection() as conn:
-        conn.execute("""
+        cursor = conn.cursor()
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             url TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             company TEXT NOT NULL,
             source TEXT NOT NULL,
             location TEXT,
-            salary TEXT,
-            status TEXT NOT NULL DEFAULT 'ACTIVE',
-            discovered_at TIMESTAMP NOT NULL,
-            last_seen_at TIMESTAMP NOT NULL
+            discovered_at TIMESTAMP NOT NULL
         )
         """)
-
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-        if "status" not in columns:
-            conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
-        if "discovered_at" not in columns:
-            conn.execute("ALTER TABLE jobs ADD COLUMN discovered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP")
-        if "last_seen_at" not in columns:
-            conn.execute("ALTER TABLE jobs ADD COLUMN last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP")
-
         conn.commit()
 
-def upsert_job(url: str, title: str, company: str, source: str, location: str, salary: str) -> bool:
-    """Inserts a new job or updates last_seen_at. Returns True if brand new."""
-    now = datetime.now().isoformat()
+def is_job_recorded(url: str) -> bool:
+    """Check whether a job URL already exists in the database."""
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT url FROM jobs WHERE url = ?", (url,))
-        exists = cursor.fetchone() is not None
+        cursor.execute("SELECT 1 FROM jobs WHERE url = ?", (url,))
+        return cursor.fetchone() is not None
+
+def record_job(url: str, title: str, company: str, source: str, location: Optional[str] = None) -> bool:
+    """Insert a newly discovered job record."""
+    if is_job_recorded(url):
+        return False
         
-        if exists:
-            cursor.execute("UPDATE jobs SET last_seen_at = ?, status = 'ACTIVE' WHERE url = ?", (now, url))
-            return False
-        else:
-            cursor.execute("""
-                INSERT INTO jobs (url, title, company, source, location, salary, status, discovered_at, last_seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
-            """, (url, title, company, source, location, salary, now, now))
-            return True
-
-def reconcile_missing_jobs(active_urls: set, source_name: str, lookback_days: int = 14) -> list:
-    """Marks jobs as REMOVED if they disappeared from the live boards, enabling takedown alerts."""
-    now = datetime.now()
-    cutoff = (now - timedelta(days=lookback_days)).isoformat()
-    newly_removed = []
-
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT url, title, company FROM jobs 
-            WHERE source = ? AND status = 'ACTIVE' AND discovered_at >= ?
-        """, (source_name, cutoff))
-        
-        for url, title, company in cursor.fetchall():
-            if url not in active_urls:
-                cursor.execute("UPDATE jobs SET status = 'REMOVED' WHERE url = ?", (url,))
-                newly_removed.append(f"{title} at {company}")
-    return newly_removed
+        INSERT INTO jobs (url, title, company, source, location, discovered_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (url, title, company, source, location or "Unspecified", datetime.now().isoformat()))
+        conn.commit()
+    return True
+
+def get_recent_jobs(limit: int = 50) -> List[Tuple[str, str, str, str, str, str]]:
+    """Retrieve recent records for inspection."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT url, title, company, source, location, discovered_at 
+        FROM jobs 
+        ORDER BY discovered_at DESC 
+        LIMIT ?
+        """, (limit,))
+        return cursor.fetchall()
