@@ -1,62 +1,134 @@
+# aggregator.py
 import re
-import os
 import logging
 import requests
 from bs4 import BeautifulSoup
-from typing import List, Dict, Any
-from database import init_db, record_job
+from typing import List, Dict, Any, Tuple
+from playwright.sync_api import sync_playwright
+from database import init_db, upsert_job, reconcile_missing_jobs
 
-# Configure Local Logging
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-LOG_FILE = os.path.join(DATA_DIR, "aggregator.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
-)
-
-# Regex Match Patterns for Job Titles
-TARGET_ROLE_PATTERNS = [
+# Filtering Regexes
+ROLE_PATTERNS = [
     r"\btechnical analyst\b", r"\btech analyst\b", r"\bbusiness analyst\b",
-    r"\bsoftware analyst\b", r"\btechnical writer\b", r"\bsystems analyst\b"
+    r"\bsoftware analyst\b", r"\btechnical writer\b", r"\bai enablement\b",
+    r"\batlassian\b", r"\bjira\b", r"\bconfluence\b"
 ]
 
-GREENHOUSE_BOARDS = ["gitlab", "stripe", "cloudflare", "hashicorp"]
-LEVER_BOARDS = ["netflix", "palantir", "spotify"]
-HTML_SCRAPE_TARGETS = [{
-    "company": "Example Tech",
-    "url": "https://news.ycombinator.com/jobs",
-    "selector": "tr.athing td.title a.titlelink"
-}]
+LOCATION_PATTERNS = [r"\bremote\b", r"\bmaine\b", r"\bportland\b"]
+EXCLUDED_COMPANIES = ["syllo", "coupa", "campminder", "capital one"]
 
-def matches_target_role(title: str) -> bool:
-    for pattern in TARGET_ROLE_PATTERNS:
-        if re.search(pattern, title, re.IGNORECASE): return True
-    return False
+def matches_filters(title: str, location: str, company: str) -> bool:
+    if any(ex.lower() in company.lower() for ex in EXCLUDED_COMPANIES):
+        return False
+    
+    title_match = any(re.search(pat, title, re.IGNORECASE) for pat in ROLE_PATTERNS)
+    loc_match = any(re.search(pat, location, re.IGNORECASE) for pat in LOCATION_PATTERNS) if location else True
+    
+    return title_match and loc_match
 
-def process_greenhouse_boards() -> int:
-    new_jobs_found = 0
-    for board in GREENHOUSE_BOARDS:
-        api_url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs"
+def parse_salary(text: str) -> str:
+    """Extract dollar figures or ranges from text blocks."""
+    match = re.search(r"\$\d{2,3}(?:,\d{3})*(?:\s*-\s*\$\d{2,3}(?:,\d{3})*)?", text)
+    return match.group(0) if match else "Unlisted"
+
+# --- Source 1: Greenhouse API ---
+def fetch_greenhouse(boards: List[str]) -> set:
+    seen_urls = set()
+    for board in boards:
+        api_url = f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true"
         try:
-            response = requests.get(api_url, timeout=12)
-            if response.status_code == 200:
-                for job in response.json().get("jobs", []):
-                    title, job_url = job.get("title", ""), job.get("absolute_url", "")
+            res = requests.get(api_url, timeout=10)
+            if res.status_code == 200:
+                for job in res.json().get("jobs", []):
+                    title = job.get("title", "")
+                    url = job.get("absolute_url", "")
                     loc = job.get("location", {}).get("name", "Remote")
-                    if matches_target_role(title) and record_job(job_url, title, board.capitalize(), "Greenhouse", loc):
-                        logging.info(f"[NEW] {title} at {board.capitalize()} -> {job_url}")
-                        new_jobs_found += 1
-        except Exception as e: logging.error(f"Error {board}: {e}")
-    return new_jobs_found
+                    content = job.get("content", "")
+                    salary = parse_salary(content)
+                    
+                    if matches_filters(title, loc, board):
+                        seen_urls.add(url)
+                        is_new = upsert_job(url, title, board.capitalize(), "Greenhouse", loc, salary)
+                        if is_new:
+                            logging.info(f"[NEW GREENHOUSE] {title} at {board.capitalize()} ({salary}) -> {url}")
+        except Exception as e:
+            logging.error(f"Greenhouse error for {board}: {e}")
+    return seen_urls
+
+# --- Source 2: Ashby API ---
+def fetch_ashby(companies: List[str]) -> set:
+    seen_urls = set()
+    for company in companies:
+        api_url = f"https://api.ashbyhq.com/posting-api/job-board/{company}"
+        try:
+            res = requests.get(api_url, timeout=10)
+            if res.status_code == 200:
+                for job in res.json().get("jobs", []):
+                    title = job.get("title", "")
+                    url = job.get("jobUrl", "")
+                    loc = job.get("location", "Remote")
+                    salary = parse_salary(str(job.get("compensation", "")))
+                    
+                    if matches_filters(title, loc, company):
+                        seen_urls.add(url)
+                        is_new = upsert_job(url, title, company.capitalize(), "Ashby", loc, salary)
+                        if is_new:
+                            logging.info(f"[NEW ASHBY] {title} at {company.capitalize()} ({salary}) -> {url}")
+        except Exception as e:
+            logging.error(f"Ashby error for {company}: {e}")
+    return seen_urls
+
+# --- Source 3: Dynamic Browser Scraper (Playwright) for Headless Boards ---
+def fetch_rendered_board(target_url: str, source_name: str, selector: str) -> set:
+    seen_urls = set()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")
+        page = context.new_page()
+        try:
+            page.goto(target_url, wait_until="networkidle", timeout=30000)
+            elements = page.query_selector_all(selector)
+            
+            for el in elements:
+                title = el.inner_text().strip()
+                href = el.get_attribute("href")
+                url = href if href.startswith("http") else f"{target_url.rstrip('/')}/{href.lstrip('/')}"
+                
+                if matches_filters(title, "Remote", source_name):
+                    seen_urls.add(url)
+                    is_new = upsert_job(url, title, source_name, source_name, "Remote/Unspecified", "Unlisted")
+                    if is_new:
+                        logging.info(f"[NEW PLAYWRIGHT] {title} at {source_name} -> {url}")
+        except Exception as e:
+            logging.error(f"Playwright error on {target_url}: {e}")
+        finally:
+            browser.close()
+    return seen_urls
 
 def run_aggregator():
-    logging.info("Starting aggregator run...")
     init_db()
-    total = process_greenhouse_boards() # and others...
-    logging.info(f"Finished. Found: {total}")
+    
+    # 1. Greenhouse Targets
+    gh_boards = ["gitlab", "stripe", "cloudflare", "hashicorp", "starburst", "iterable", "cloverhealth"]
+    gh_seen = fetch_greenhouse(gh_boards)
+    gh_removed = reconcile_missing_jobs(gh_seen, "Greenhouse")
+    
+    # 2. Ashby Targets
+    ashby_boards = ["harvey", "firecrawl"]
+    ashby_seen = fetch_ashby(ashby_boards)
+    ashby_removed = reconcile_missing_jobs(ashby_seen, "Ashby")
+    
+    # 3. Custom Dynamic Targets via Playwright
+    # (Used for sites rendering job lists via JS without public APIs)
+    builtin_seen = fetch_rendered_board("https://builtin.com/jobs/remote/tech", "BuiltIn", "a.job-title")
+    
+    # Report closed roles
+    all_removed = gh_removed + ashby_removed
+    for removed_job in all_removed:
+        logging.info(f"[CLOSED/REMOVED] {removed_job['title']} at {removed_job['company']} -> {removed_job['url']}")
 
-if __name__ == "__main__": run_aggregator()
+if __name__ == "__main__":
+    run_aggregator()
