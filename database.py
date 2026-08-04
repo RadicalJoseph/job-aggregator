@@ -28,6 +28,16 @@ def init_db() -> None:
         )
         """)
 
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "status" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'")
+        if "discovered_at" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN discovered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP")
+        if "last_seen_at" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP")
+
+        conn.commit()
+
 def upsert_job(url: str, title: str, company: str, source: str, location: str, salary: str) -> bool:
     """Inserts a new job or updates last_seen_at. Returns True if brand new."""
     now = datetime.now().isoformat()
