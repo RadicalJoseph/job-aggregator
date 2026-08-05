@@ -84,14 +84,14 @@ def parse_salary_floor(text: str) -> Optional[int]:
     return None
 
 def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
-    """Parses salary and determines if it meets organizational requirements."""
+    """Parses salary and enforces a global minimum threshold."""
     floor = parse_salary_floor(text)
     salary_str = f"${floor:,}" if floor else "Unspecified"
 
-    is_conservation = any(t.lower() in company_or_source.lower() for t in CONSERVATION_ENVIRONMENTAL_TARGETS)
-
-    if is_conservation and floor is not None:
-        return (floor >= MIN_CONSERVATION_SALARY, salary_str)
+    # Reject any role where the parsed salary falls below the minimum
+    if floor is not None and floor < MIN_CONSERVATION_SALARY:
+        return (False, salary_str)
+        
     return (True, salary_str)
 
 
@@ -223,29 +223,34 @@ def process_jobspy_boards() -> int:
             # Merge and drop duplicate URLs found in both queries
             jobs_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['job_url'])
             
+            # Iterate through the returned dataframe rows
             for _, row in jobs_df.iterrows():
                 # Cast title and skip NaN objects
                 title = str(row.get("title", "")) if pd.notna(row.get("title")) else ""
+                company = str(row.get("company", "Unknown")) if pd.notna(row.get("company")) else "Unknown"
                 
-                if matches_target_role(title):
+                # Enforce the conservation target list for JobSpy results
+                is_conservation = any(t.lower() in company.lower() for t in CONSERVATION_ENVIRONMENTAL_TARGETS)
+                
+                # Proceed only if the role matches target patterns and the company is a conservation target
+                if matches_target_role(title) and is_conservation:
                     url = str(row.get("job_url", "")) if pd.notna(row.get("job_url")) else ""
-                    company = str(row.get("company", "Unknown")) if pd.notna(row.get("company")) else "Unknown"
                     loc = str(row.get("location", "Unspecified")) if pd.notna(row.get("location")) else "Unspecified"
                     description = str(row.get("description", "")) if pd.notna(row.get("description")) else ""
                     site = f"JobSpy ({str(row.get('site', 'Unknown'))})"
                     
-                    # Fix the 'nan' UI bug by explicitly checking for pandas NaN values
+                    # Prevent 'nan' strings from entering the database
                     raw_date = row.get("date_posted")
                     posted_at = str(raw_date) if pd.notna(raw_date) else None
                     
-                    # Inject JobSpy's native numeric salary data into the description 
-                    # so the existing evaluate_salary regex can parse it if it exists
+                    # Inject parsed JobSpy salary into description for regex evaluation
                     min_sal = row.get("min_amount")
                     if pd.notna(min_sal) and float(min_sal) > 0:
                         description += f" ${int(min_sal):,} "
                     
                     is_valid, sal_str = evaluate_salary(company, description)
                     
+                    # Record valid entries to the database
                     if is_valid and record_job(url, title, company, site, loc, sal_str, posted_at):
                         logging.info(f"[NEW] {site}: {title} -> {url}")
                         new_jobs += 1
