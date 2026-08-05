@@ -19,15 +19,15 @@ def refresh_data(tree, text_widget):
         tree.delete(row)
 
     for job in database.get_recent_jobs():
-        # job tuple layout: (title, company, source, location, salary, discovered_at, url, status)
-        title, company, source, location, salary, discovered, url, status = job
+        # job tuple layout: (title, company, source, location, salary, posted_at, discovered_at, url, status)
+        title, company, source, location, salary, posted_at, discovered, url, status = job
         
         # Determine checkmark visual state based on recorded DB status
         applied_chk = "☑" if status == "Applied" else "☐"
         ignored_chk = "☑" if status == "Ignored" else "☐"
         rejected_chk = "☑" if status == "Rejected" else "☐"
         
-        row_data = [title, company, source, location, salary, discovered, url, applied_chk, ignored_chk, rejected_chk]
+        row_data = [title, company, source, location, salary, posted_at, discovered, url, applied_chk, ignored_chk, rejected_chk]
         tree.insert('', tk.END, values=row_data)
         
     text_widget.config(state=tk.NORMAL)
@@ -57,8 +57,8 @@ def copy_url(event, tree):
     selected_item = tree.selection()
     if not selected_item: return
     item_values = tree.item(selected_item[0], 'values')
-    if len(item_values) >= 7:
-        url = item_values[6] # URL is at index 6
+    if len(item_values) >= 8:
+        url = item_values[7] # URL is at index 7
         tree.clipboard_clear()
         tree.clipboard_append(url)
         messagebox.showinfo("URL Copied", "The job URL has been copied to your clipboard.")
@@ -72,17 +72,17 @@ def handle_single_click(event, tree, text_widget):
     item = tree.identify_row(event.y)
     if not item: return
     
-    status_map = {'#8': 'Applied', '#9': 'Ignored', '#10': 'Rejected'}
+    status_map = {'#9': 'Applied', '#10': 'Ignored', '#11': 'Rejected'}
     
     if col in status_map:
         clicked_status = status_map[col]
         item_values = tree.item(item, 'values')
-        url = item_values[6]
-        
+        url = item_values[7]
+
         # Toggle status: if already set to this status, reset to 'New', otherwise set to clicked status
-        current_applied = item_values[7] == "☑"
-        current_ignored = item_values[8] == "☑"
-        current_rejected = item_values[9] == "☑"
+        current_applied = item_values[8] == "☑"
+        current_ignored = item_values[9] == "☑"
+        current_rejected = item_values[10] == "☑"
         
         is_currently_active = (
             (clicked_status == 'Applied' and current_applied) or
@@ -106,7 +106,7 @@ def main():
     tab_db = ttk.Frame(notebook)
     notebook.add(tab_db, text='Database Records')
 
-    columns = ("Title", "Company", "Source", "Location", "Salary", "Discovered", "URL", "Applied", "Ignored", "Rejected")
+    columns = ("Title", "Company", "Source", "Location", "Salary", "Posted", "Discovered", "URL", "Applied", "Ignored", "Rejected")
     tree = ttk.Treeview(tab_db, columns=columns, show="headings")
 
     for col in columns:
@@ -117,6 +117,7 @@ def main():
     tree.column("Source", width=100, anchor=tk.W)
     tree.column("Location", width=100, anchor=tk.W)
     tree.column("Salary", width=90, anchor=tk.W)
+    tree.column("Posted", width=120, anchor=tk.W)
     tree.column("Discovered", width=130, anchor=tk.W)
     tree.column("URL", width=150, anchor=tk.W)
     tree.column("Applied", width=60, anchor=tk.CENTER)

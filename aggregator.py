@@ -65,12 +65,27 @@ def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
     """Parses salary and determines if it meets organizational requirements."""
     floor = parse_salary_floor(text)
     salary_str = f"${floor:,}" if floor else "Unspecified"
-    
+
     is_conservation = any(t.lower() in company_or_source.lower() for t in CONSERVATION_ENVIRONMENTAL_TARGETS)
-    
+
     if is_conservation and floor is not None:
         return (floor >= MIN_CONSERVATION_SALARY, salary_str)
     return (True, salary_str)
+
+
+def extract_posted_at(job_payload: dict) -> Optional[str]:
+    """Best-effort extraction of a source-provided posting date."""
+    for key in ("postedAt", "posted_at", "createdAt", "datePosted", "publishedAt"):
+        value = job_payload.get(key)
+        if value:
+            return str(value)
+
+    for key in ("updatedAt", "lastUpdated"):
+        value = job_payload.get(key)
+        if value:
+            return str(value)
+
+    return None
 
 def process_greenhouse_boards() -> int:
     new_jobs = 0
@@ -83,7 +98,8 @@ def process_greenhouse_boards() -> int:
                     if matches_target_role(title):
                         url, loc, content = job.get("absolute_url", ""), job.get("location", {}).get("name", "Remote"), job.get("content", "")
                         is_valid, sal_str = evaluate_salary(display_name, content)
-                        if is_valid and record_job(url, title, display_name, "Greenhouse API", loc, sal_str):
+                        posted_at = extract_posted_at(job)
+                        if is_valid and record_job(url, title, display_name, "Greenhouse API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -100,7 +116,8 @@ def process_ashby_boards() -> int:
                     if matches_target_role(title):
                         url, loc = job.get("jobUrl", ""), job.get("locationName", "Remote")
                         is_valid, sal_str = evaluate_salary(display_name, str(job))
-                        if is_valid and record_job(url, title, display_name, "Ashby API", loc, sal_str):
+                        posted_at = extract_posted_at(job)
+                        if is_valid and record_job(url, title, display_name, "Ashby API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -117,7 +134,8 @@ def process_lever_boards() -> int:
                     if matches_target_role(title):
                         url, loc = job.get("hostedUrl", ""), job.get("categories", {}).get("location", "Remote")
                         is_valid, sal_str = evaluate_salary(display_name, job.get("descriptionPlain", ""))
-                        if is_valid and record_job(url, title, display_name, "Lever API", loc, sal_str):
+                        posted_at = extract_posted_at(job)
+                        if is_valid and record_job(url, title, display_name, "Lever API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
