@@ -68,6 +68,51 @@ class DatabaseSchemaTests(unittest.TestCase):
             columns = [row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()]
             self.assertIn("posted_at", columns)
 
+    def test_init_db_deduplicates_existing_rows_by_url(self):
+        with sqlite3.connect(database.DB_PATH) as conn:
+            conn.execute("""
+            CREATE TABLE jobs (
+                url TEXT,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                source TEXT NOT NULL,
+                location TEXT,
+                salary TEXT,
+                status TEXT DEFAULT 'New',
+                discovered_at TIMESTAMP NOT NULL
+            )
+            """)
+            conn.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+                "https://example.com/job",
+                "Duplicate A",
+                "Acme",
+                "Source",
+                "Remote",
+                "Unspecified",
+                "New",
+                "2026-01-01T00:00:00",
+            ))
+            conn.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+                "https://example.com/job",
+                "Duplicate B",
+                "Acme",
+                "Source",
+                "Remote",
+                "Unspecified",
+                "New",
+                "2026-01-02T00:00:00",
+            ))
+            conn.commit()
+
+        database.init_db()
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            rows = conn.execute("SELECT title FROM jobs WHERE url = ?", ("https://example.com/job",)).fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(any("Duplicate" in row[0] for row in rows))
+            indexes = conn.execute("PRAGMA index_list(jobs)").fetchall()
+            self.assertTrue(any(index[1] == "idx_jobs_url" for index in indexes))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,17 @@ def init_db() -> None:
         if "posted_at" not in columns:
             cursor.execute("ALTER TABLE jobs ADD COLUMN posted_at TEXT")
             conn.commit()
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_jobs_url ON jobs(url)")
+        conn.commit()
+
+        cursor.execute("""
+        DELETE FROM jobs
+        WHERE rowid NOT IN (
+            SELECT MIN(rowid) FROM jobs GROUP BY url
+        )
+        """)
+        conn.commit()
     finally:
         conn.close()
 
