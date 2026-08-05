@@ -94,6 +94,19 @@ def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
         
     return (True, salary_str)
 
+def is_recent_enough(posted_at: Optional[str]) -> bool:
+    """Evaluates if a parsed date string falls within the last 7 days."""
+    if not posted_at:
+        return True  # Include jobs with missing dates to prevent false negatives
+    
+    try:
+        # Leverage pandas' robust datetime parser to handle varying API formats
+        dt = pd.to_datetime(posted_at, utc=True)
+        cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=7)
+        return dt >= cutoff
+    except Exception as e:
+        logging.debug(f"Date parsing failed for '{posted_at}': {e}")
+        return True  # Default to inclusion on parse failure
 
 def extract_posted_at(job_payload: dict) -> Optional[str]:
     """Best-effort extraction of a source-provided posting date from nested payloads."""
@@ -142,7 +155,7 @@ def process_greenhouse_boards() -> int:
                         is_valid, sal_str = evaluate_salary(display_name, content)
                         posted_at = extract_posted_at(job)
                         company_name = extract_company_name(job, display_name)
-                        if is_valid and record_job(url, title, company_name, "Greenhouse API", loc, sal_str, posted_at):
+                        if is_valid and is_recent_enough(posted_at) and record_job(url, title, company_name, "Greenhouse API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -161,7 +174,7 @@ def process_ashby_boards() -> int:
                         is_valid, sal_str = evaluate_salary(display_name, str(job))
                         posted_at = extract_posted_at(job)
                         company_name = extract_company_name(job, display_name)
-                        if is_valid and record_job(url, title, company_name, "Ashby API", loc, sal_str, posted_at):
+                        if is_valid and is_recent_enough(posted_at) and record_job(url, title, company_name, "Ashby API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -180,7 +193,7 @@ def process_lever_boards() -> int:
                         is_valid, sal_str = evaluate_salary(display_name, job.get("descriptionPlain", ""))
                         posted_at = extract_posted_at(job)
                         company_name = extract_company_name(job, display_name)
-                        if is_valid and record_job(url, title, company_name, "Lever API", loc, sal_str, posted_at):
+                        if is_valid and is_recent_enough(posted_at) and record_job(url, title, company_name, "Lever API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -191,6 +204,7 @@ def process_jobspy_boards() -> int:
     Executes concurrent scraping across Indeed and LinkedIn.
     Splits queries to explicitly target US-based Remote roles 
     and local roles within a 100-mile radius of Yarmouth, ME.
+    Restricts results to established conservation targets.
     """
     new_jobs = 0
     search_terms = ["Atlassian Administrator", "Technical Writer", "Knowledge Management", "Systems Analyst"]
@@ -250,8 +264,8 @@ def process_jobspy_boards() -> int:
                     
                     is_valid, sal_str = evaluate_salary(company, description)
                     
-                    # Record valid entries to the database
-                    if is_valid and record_job(url, title, company, site, loc, sal_str, posted_at):
+                    # Add the 7-day window filter before recording
+                    if is_valid and is_recent_enough(posted_at) and record_job(url, title, company, site, loc, sal_str, posted_at):
                         logging.info(f"[NEW] {site}: {title} -> {url}")
                         new_jobs += 1
                         
@@ -263,7 +277,6 @@ def process_jobspy_boards() -> int:
 def write_refresh_signal() -> None:
     with open(REFRESH_SIGNAL_PATH, "w", encoding="utf-8") as handle:
         handle.write(datetime.now().isoformat())
-
 
 def run_aggregator(source: Optional[str] = None):
     trigger_source = source or ("Task Scheduler" if os.environ.get("TASK_SCHEDULER") else "Manual")
