@@ -16,6 +16,18 @@ class MatchesTargetRoleTests(unittest.TestCase):
         self.assertTrue(aggregator.matches_target_role("Sr. Tech Specialist"))
 
 
+class PostedDateExtractionTests(unittest.TestCase):
+    def test_extract_posted_at_recurses_through_nested_payloads(self):
+        payload = {
+            "job": {
+                "meta": {
+                    "publishedAt": "2026-07-03T12:25:05.315+00:00"
+                }
+            }
+        }
+        self.assertEqual(aggregator.extract_posted_at(payload), "2026-07-03T12:25:05.315+00:00")
+
+
 class DatabaseSchemaTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()

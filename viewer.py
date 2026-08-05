@@ -9,10 +9,13 @@ LOG_PATH = os.path.join(DATA_DIR, "aggregator.log")
 REFRESH_SIGNAL_PATH = os.path.join(DATA_DIR, "refresh.signal")
 
 def read_log_file():
-    if not os.path.exists(LOG_PATH): return "Log file not found."
+    if not os.path.exists(LOG_PATH):
+        return "Log file not found."
     try:
-        with open(LOG_PATH, 'r', encoding='utf-8') as file: return file.read()
-    except Exception as e: return f"Error reading log: {e}"
+        with open(LOG_PATH, 'r', encoding='utf-8', errors='replace') as file:
+            return file.read()
+    except Exception as e:
+        return f"Error reading log: {e}"
 
 def refresh_data(tree, text_widget):
     for row in tree.get_children(): 

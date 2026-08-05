@@ -74,16 +74,36 @@ def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
 
 
 def extract_posted_at(job_payload: dict) -> Optional[str]:
-    """Best-effort extraction of a source-provided posting date."""
-    for key in ("postedAt", "posted_at", "createdAt", "datePosted", "publishedAt"):
-        value = job_payload.get(key)
-        if value:
-            return str(value)
+    """Best-effort extraction of a source-provided posting date from nested payloads."""
+    if not isinstance(job_payload, dict):
+        return None
 
-    for key in ("updatedAt", "lastUpdated"):
-        value = job_payload.get(key)
+    candidates = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, nested_value in value.items():
+                lowered = key.lower()
+                if lowered in {"postedat", "posted_at", "createdat", "dateposted", "publishedat", "updatedat", "lastupdated"}:
+                    if nested_value:
+                        candidates.append(str(nested_value))
+                elif isinstance(nested_value, (dict, list)):
+                    walk(nested_value)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(job_payload)
+
+    for key in ("postedAt", "posted_at", "createdAt", "datePosted", "publishedAt", "updatedAt", "lastUpdated"):
+        if key in job_payload:
+            value = job_payload.get(key)
+            if value:
+                return str(value)
+
+    for value in candidates:
         if value:
-            return str(value)
+            return value
 
     return None
 
