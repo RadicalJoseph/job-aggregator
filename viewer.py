@@ -17,9 +17,11 @@ def read_log_file():
     except Exception as e:
         return f"Error reading log: {e}"
 
-def refresh_data(tree, text_widget):
+def refresh_data(tree, text_widget, filter_text=None):
     for row in tree.get_children(): 
         tree.delete(row)
+
+    filter_value = (filter_text or "").strip().lower()
 
     for job in database.get_recent_jobs():
         # job tuple layout: (title, company, source, location, salary, posted_at, discovered_at, url, status)
@@ -44,6 +46,10 @@ def refresh_data(tree, text_widget):
         rejected_chk = "☑" if status == "Rejected" else "☐"
         
         row_data = [title, company, source, location, salary, posted_at, discovered, url, applied_chk, ignored_chk, rejected_chk]
+        if filter_value:
+            match_text = " ".join(str(value) for value in row_data).lower()
+            if filter_value not in match_text:
+                continue
         tree.insert('', tk.END, values=row_data)
         
     text_widget.config(state=tk.NORMAL)
@@ -57,16 +63,17 @@ def get_refresh_marker_time():
     return os.path.getmtime(REFRESH_SIGNAL_PATH)
 
 
-def watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed=False):
+def watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed=False, filter_getter=None):
     latest_time = get_refresh_marker_time()
     if latest_time is not None and (last_seen_time is None or latest_time > last_seen_time):
         if not already_consumed:
-            refresh_data(tree, text_widget)
+            filter_text = filter_getter() if filter_getter else ""
+            refresh_data(tree, text_widget, filter_text)
             already_consumed = True
         last_seen_time = latest_time
     elif latest_time is None:
         already_consumed = False
-    root.after(250, lambda: watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed))
+    root.after(250, lambda: watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed, filter_getter))
 
 
 def copy_url(event, tree):
@@ -79,7 +86,7 @@ def copy_url(event, tree):
         tree.clipboard_append(url)
         messagebox.showinfo("URL Copied", "The job URL has been copied to your clipboard.")
 
-def handle_single_click(event, tree, text_widget):
+def handle_single_click(event, tree, text_widget, filter_text=""):
     """Detects clicks on status columns and updates status without removing the row."""
     region = tree.identify("region", event.x, event.y)
     if region != "cell": return
@@ -109,25 +116,24 @@ def handle_single_click(event, tree, text_widget):
         new_status = 'New' if is_currently_active else clicked_status
         
         database.update_job_status(url, new_status)
-        refresh_data(tree, text_widget)
+        refresh_data(tree, text_widget, filter_text)
 
-def main():
-    root = tk.Tk()
-    root.title("Local Job Board Aggregator Viewer")
-    root.geometry("1200x700")
+def sort_treeview(tree, col, reverse):
+    items = [(tree.set(child, col), child) for child in tree.get_children('')]
+    items.sort(key=lambda x: x[0].lower() if isinstance(x[0], str) else str(x[0]), reverse=reverse)
+    for index, (_, child) in enumerate(items):
+        tree.move(child, '', index)
 
-    notebook = ttk.Notebook(root)
-    notebook.pack(expand=True, fill='both', padx=10, pady=10)
+    tree.heading(col, command=lambda: sort_treeview(tree, col, not reverse))
 
-    tab_db = ttk.Frame(notebook)
-    notebook.add(tab_db, text='Database Records')
 
+def build_treeview(tab_db, log_text, filter_var):
     columns = ("Title", "Company", "Source", "Location", "Salary", "Posted", "Discovered", "URL", "Applied", "Ignored", "Rejected")
     tree = ttk.Treeview(tab_db, columns=columns, show="headings")
 
     for col in columns:
-        tree.heading(col, text=col)
-    
+        tree.heading(col, text=col, command=lambda c=col: sort_treeview(tree, c, False))
+
     tree.column("Title", width=220, anchor=tk.W)
     tree.column("Company", width=120, anchor=tk.W)
     tree.column("Source", width=100, anchor=tk.W)
@@ -144,24 +150,50 @@ def main():
     tree.configure(yscrollcommand=scrollbar.set)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     tree.pack(expand=True, fill='both')
-    
+
     tree.bind("<Double-1>", lambda e: copy_url(e, tree))
-    tree.bind("<ButtonRelease-1>", lambda e: handle_single_click(e, tree, log_text))
+    tree.bind("<ButtonRelease-1>", lambda e: handle_single_click(e, tree, log_text, filter_var.get()))
+    return tree
+
+
+def main():
+    root = tk.Tk()
+    root.title("Local Job Board Aggregator Viewer")
+    root.geometry("1200x700")
+
+    notebook = ttk.Notebook(root)
+    notebook.pack(expand=True, fill='both', padx=10, pady=10)
+
+    tab_db = ttk.Frame(notebook)
+    notebook.add(tab_db, text='Database Records')
 
     tab_log = ttk.Frame(notebook)
     notebook.add(tab_log, text='Execution Logs')
     log_text = scrolledtext.ScrolledText(tab_log, wrap=tk.WORD, state=tk.DISABLED)
     log_text.pack(expand=True, fill='both', padx=5, pady=5)
 
+    filter_var = tk.StringVar()
+    filter_frame = ttk.Frame(tab_db)
+    filter_frame.pack(fill='x', padx=5, pady=(5, 0))
+    ttk.Label(filter_frame, text="Filter:").pack(side=tk.LEFT)
+    filter_entry = ttk.Entry(filter_frame, textvariable=filter_var)
+    filter_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(5, 0))
+    filter_button = ttk.Button(filter_frame, text="Apply", command=lambda: refresh_data(tree, log_text, filter_var.get()))
+    filter_button.pack(side=tk.LEFT, padx=(5, 0))
+    clear_button = ttk.Button(filter_frame, text="Clear", command=lambda: (filter_var.set(""), refresh_data(tree, log_text, "")))
+    clear_button.pack(side=tk.LEFT, padx=(5, 0))
+
+    tree = build_treeview(tab_db, log_text, filter_var)
+
     control_frame = ttk.Frame(root)
     control_frame.pack(fill='x', padx=10, pady=(0, 10))
-    refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: refresh_data(tree, log_text))
+    refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: refresh_data(tree, log_text, filter_var.get()))
     refresh_btn.pack(side=tk.LEFT)
     hint_label = ttk.Label(control_frame, text="Double-click row to copy URL | Click status box to toggle checkmark.")
     hint_label.pack(side=tk.RIGHT)
 
-    refresh_data(tree, log_text)
-    root.after(250, lambda: watch_for_refresh(tree, log_text, get_refresh_marker_time(), root, False))
+    refresh_data(tree, log_text, "")
+    root.after(250, lambda: watch_for_refresh(tree, log_text, get_refresh_marker_time(), root, False, lambda: filter_var.get()))
     root.mainloop()
 
 if __name__ == "__main__":
