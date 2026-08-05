@@ -3,6 +3,7 @@ import re
 import os
 import logging
 import requests
+from datetime import datetime
 from typing import Optional, Tuple
 from database import init_db, record_job
 
@@ -11,6 +12,7 @@ if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 LOG_FILE = os.path.join(DATA_DIR, "aggregator.log")
+REFRESH_SIGNAL_PATH = os.path.join(DATA_DIR, "refresh.signal")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -118,11 +120,17 @@ def process_lever_boards() -> int:
         except Exception as e: logging.error(f"Error {display_name}: {e}")
     return new_jobs
 
+def write_refresh_signal() -> None:
+    with open(REFRESH_SIGNAL_PATH, "w", encoding="utf-8") as handle:
+        handle.write(datetime.now().isoformat())
+
+
 def run_aggregator():
     logging.info("Starting aggregated job collection cycle...")
     init_db()
     total_found = process_greenhouse_boards() + process_ashby_boards() + process_lever_boards()
     logging.info(f"Aggregation complete. Processed {total_found} new qualifying roles.")
+    write_refresh_signal()
 
 if __name__ == "__main__":
     run_aggregator()

@@ -6,6 +6,7 @@ import database
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 LOG_PATH = os.path.join(DATA_DIR, "aggregator.log")
+REFRESH_SIGNAL_PATH = os.path.join(DATA_DIR, "refresh.signal")
 
 def read_log_file():
     if not os.path.exists(LOG_PATH): return "Log file not found."
@@ -16,7 +17,7 @@ def read_log_file():
 def refresh_data(tree, text_widget):
     for row in tree.get_children(): 
         tree.delete(row)
-        
+
     for job in database.get_recent_jobs():
         # job tuple layout: (title, company, source, location, salary, discovered_at, url, status)
         title, company, source, location, salary, discovered, url, status = job
@@ -33,6 +34,24 @@ def refresh_data(tree, text_widget):
     text_widget.delete(1.0, tk.END)
     text_widget.insert(tk.END, read_log_file())
     text_widget.config(state=tk.DISABLED)
+
+def get_refresh_marker_time():
+    if not os.path.exists(REFRESH_SIGNAL_PATH):
+        return None
+    return os.path.getmtime(REFRESH_SIGNAL_PATH)
+
+
+def watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed=False):
+    latest_time = get_refresh_marker_time()
+    if latest_time is not None and (last_seen_time is None or latest_time > last_seen_time):
+        if not already_consumed:
+            refresh_data(tree, text_widget)
+            already_consumed = True
+        last_seen_time = latest_time
+    elif latest_time is None:
+        already_consumed = False
+    root.after(250, lambda: watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed))
+
 
 def copy_url(event, tree):
     selected_item = tree.selection()
@@ -125,6 +144,7 @@ def main():
     hint_label.pack(side=tk.RIGHT)
 
     refresh_data(tree, log_text)
+    root.after(250, lambda: watch_for_refresh(tree, log_text, get_refresh_marker_time(), root, False))
     root.mainloop()
 
 if __name__ == "__main__":
