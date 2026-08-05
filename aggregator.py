@@ -229,8 +229,12 @@ def process_jobspy_boards() -> int:
                 results_wanted=15
             )
             
-            # Filter out empty dataframes and combine the results
-            frames = [df for df in (df_remote, df_local) if df is not None and not df.empty]
+            # Filter out empty dataframes and strip all-NA columns to prevent concat deprecation warnings
+            frames = [
+                df.dropna(how='all', axis=1) 
+                for df in (df_remote, df_local) 
+                if df is not None and not df.empty
+            ]
             if not frames:
                 continue
                 
