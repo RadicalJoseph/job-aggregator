@@ -7,6 +7,7 @@ import database
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 LOG_PATH = os.path.join(DATA_DIR, "aggregator.log")
 REFRESH_SIGNAL_PATH = os.path.join(DATA_DIR, "refresh.signal")
+VIEW_COLUMNS = ("Title", "Company", "Source", "Location", "Salary", "Posted", "Discovered", "URL", "Applied", "Ignored", "Rejected")
 
 def read_log_file():
     if not os.path.exists(LOG_PATH):
@@ -17,11 +18,12 @@ def read_log_file():
     except Exception as e:
         return f"Error reading log: {e}"
 
-def refresh_data(tree, text_widget, filter_text=None):
+def refresh_data(tree, text_widget, filter_text=None, sort_state=None):
     for row in tree.get_children(): 
         tree.delete(row)
 
     filter_value = (filter_text or "").strip().lower()
+    rows = []
 
     for job in database.get_recent_jobs():
         # job tuple layout: (title, company, source, location, salary, posted_at, discovered_at, url, status)
@@ -50,6 +52,15 @@ def refresh_data(tree, text_widget, filter_text=None):
             match_text = " ".join(str(value) for value in row_data).lower()
             if filter_value not in match_text:
                 continue
+        rows.append(row_data)
+
+    if sort_state and sort_state.get("column"):
+        column = sort_state["column"]
+        reverse = bool(sort_state.get("reverse", False))
+        column_index = VIEW_COLUMNS.index(column) if column in VIEW_COLUMNS else 0
+        rows.sort(key=lambda row: str(row[column_index]).lower() if column_index < len(row) else "", reverse=reverse)
+
+    for row_data in rows:
         tree.insert('', tk.END, values=row_data)
         
     text_widget.config(state=tk.NORMAL)
@@ -63,17 +74,17 @@ def get_refresh_marker_time():
     return os.path.getmtime(REFRESH_SIGNAL_PATH)
 
 
-def watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed=False, filter_getter=None):
+def watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed=False, filter_getter=None, sort_state=None):
     latest_time = get_refresh_marker_time()
     if latest_time is not None and (last_seen_time is None or latest_time > last_seen_time):
         if not already_consumed:
             filter_text = filter_getter() if filter_getter else ""
-            refresh_data(tree, text_widget, filter_text)
+            refresh_data(tree, text_widget, filter_text, sort_state)
             already_consumed = True
         last_seen_time = latest_time
     elif latest_time is None:
         already_consumed = False
-    root.after(250, lambda: watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed, filter_getter))
+    root.after(250, lambda: watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed, filter_getter, sort_state))
 
 
 def copy_url(event, tree):
@@ -86,7 +97,7 @@ def copy_url(event, tree):
         tree.clipboard_append(url)
         messagebox.showinfo("URL Copied", "The job URL has been copied to your clipboard.")
 
-def handle_single_click(event, tree, text_widget, filter_text=""):
+def handle_single_click(event, tree, text_widget, filter_text="", sort_state=None):
     """Detects clicks on status columns and updates status without removing the row."""
     region = tree.identify("region", event.x, event.y)
     if region != "cell": return
@@ -116,23 +127,26 @@ def handle_single_click(event, tree, text_widget, filter_text=""):
         new_status = 'New' if is_currently_active else clicked_status
         
         database.update_job_status(url, new_status)
-        refresh_data(tree, text_widget, filter_text)
+        refresh_data(tree, text_widget, filter_text, sort_state)
 
-def sort_treeview(tree, col, reverse):
+def sort_treeview(tree, col, reverse, sort_state=None):
     items = [(tree.set(child, col), child) for child in tree.get_children('')]
     items.sort(key=lambda x: x[0].lower() if isinstance(x[0], str) else str(x[0]), reverse=reverse)
     for index, (_, child) in enumerate(items):
         tree.move(child, '', index)
 
-    tree.heading(col, command=lambda: sort_treeview(tree, col, not reverse))
+    if sort_state is not None:
+        sort_state["column"] = col
+        sort_state["reverse"] = reverse
+
+    tree.heading(col, command=lambda: sort_treeview(tree, col, not reverse, sort_state))
 
 
-def build_treeview(tab_db, log_text, filter_var):
-    columns = ("Title", "Company", "Source", "Location", "Salary", "Posted", "Discovered", "URL", "Applied", "Ignored", "Rejected")
-    tree = ttk.Treeview(tab_db, columns=columns, show="headings")
+def build_treeview(tab_db, log_text, filter_var, sort_state):
+    tree = ttk.Treeview(tab_db, columns=VIEW_COLUMNS, show="headings")
 
-    for col in columns:
-        tree.heading(col, text=col, command=lambda c=col: sort_treeview(tree, c, False))
+    for col in VIEW_COLUMNS:
+        tree.heading(col, text=col, command=lambda c=col: sort_treeview(tree, c, False, sort_state))
 
     tree.column("Title", width=220, anchor=tk.W)
     tree.column("Company", width=120, anchor=tk.W)
@@ -152,7 +166,7 @@ def build_treeview(tab_db, log_text, filter_var):
     tree.pack(expand=True, fill='both')
 
     tree.bind("<Double-1>", lambda e: copy_url(e, tree))
-    tree.bind("<ButtonRelease-1>", lambda e: handle_single_click(e, tree, log_text, filter_var.get()))
+    tree.bind("<ButtonRelease-1>", lambda e: handle_single_click(e, tree, log_text, filter_var.get(), sort_state))
     return tree
 
 
@@ -173,27 +187,28 @@ def main():
     log_text.pack(expand=True, fill='both', padx=5, pady=5)
 
     filter_var = tk.StringVar()
+    sort_state = {"column": None, "reverse": False}
     filter_frame = ttk.Frame(tab_db)
     filter_frame.pack(fill='x', padx=5, pady=(5, 0))
     ttk.Label(filter_frame, text="Filter:").pack(side=tk.LEFT)
     filter_entry = ttk.Entry(filter_frame, textvariable=filter_var)
     filter_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(5, 0))
-    filter_button = ttk.Button(filter_frame, text="Apply", command=lambda: refresh_data(tree, log_text, filter_var.get()))
+    filter_button = ttk.Button(filter_frame, text="Apply", command=lambda: refresh_data(tree, log_text, filter_var.get(), sort_state))
     filter_button.pack(side=tk.LEFT, padx=(5, 0))
-    clear_button = ttk.Button(filter_frame, text="Clear", command=lambda: (filter_var.set(""), refresh_data(tree, log_text, "")))
+    clear_button = ttk.Button(filter_frame, text="Clear", command=lambda: (filter_var.set(""), refresh_data(tree, log_text, "", sort_state)))
     clear_button.pack(side=tk.LEFT, padx=(5, 0))
 
-    tree = build_treeview(tab_db, log_text, filter_var)
+    tree = build_treeview(tab_db, log_text, filter_var, sort_state)
 
     control_frame = ttk.Frame(root)
     control_frame.pack(fill='x', padx=10, pady=(0, 10))
-    refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: refresh_data(tree, log_text, filter_var.get()))
+    refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: refresh_data(tree, log_text, filter_var.get(), sort_state))
     refresh_btn.pack(side=tk.LEFT)
     hint_label = ttk.Label(control_frame, text="Double-click row to copy URL | Click status box to toggle checkmark.")
     hint_label.pack(side=tk.RIGHT)
 
-    refresh_data(tree, log_text, "")
-    root.after(250, lambda: watch_for_refresh(tree, log_text, get_refresh_marker_time(), root, False, lambda: filter_var.get()))
+    refresh_data(tree, log_text, "", sort_state)
+    root.after(250, lambda: watch_for_refresh(tree, log_text, get_refresh_marker_time(), root, False, lambda: filter_var.get(), sort_state))
     root.mainloop()
 
 if __name__ == "__main__":
