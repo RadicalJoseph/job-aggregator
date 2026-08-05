@@ -78,7 +78,7 @@ def record_job(
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM jobs WHERE url = ?", (url,))
+        cursor.execute("SELECT 1 FROM jobs WHERE url = ? OR (title = ? AND company = ? AND location = ?)", (url, title, company, location or "Unspecified"))
         exists = cursor.fetchone() is not None
         if exists:
             if posted_at:

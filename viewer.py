@@ -24,6 +24,19 @@ def refresh_data(tree, text_widget):
     for job in database.get_recent_jobs():
         # job tuple layout: (title, company, source, location, salary, posted_at, discovered_at, url, status)
         title, company, source, location, salary, posted_at, discovered, url, status = job
+
+        if posted_at:
+            try:
+                posted_at = posted_at.split("T", 1)[0]
+            except Exception:
+                pass
+
+        if discovered:
+            try:
+                discovered_dt = discovered.replace("T", " ")
+                discovered = discovered_dt[:16]
+            except Exception:
+                pass
         
         # Determine checkmark visual state based on recorded DB status
         applied_chk = "☑" if status == "Applied" else "☐"

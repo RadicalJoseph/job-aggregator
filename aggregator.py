@@ -7,6 +7,26 @@ from datetime import datetime
 from typing import Optional, Tuple
 from database import init_db, record_job
 
+
+def extract_company_name(job_payload: dict, fallback: str) -> str:
+    """Best-effort extraction of the hiring company from the source payload."""
+    if not isinstance(job_payload, dict):
+        return fallback
+
+    for key in ("companyName", "company", "employer", "organization", "hiringCompany"):
+        value = job_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    nested = job_payload.get("company")
+    if isinstance(nested, dict):
+        for key in ("name", "companyName", "title"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return fallback
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
@@ -119,7 +139,8 @@ def process_greenhouse_boards() -> int:
                         url, loc, content = job.get("absolute_url", ""), job.get("location", {}).get("name", "Remote"), job.get("content", "")
                         is_valid, sal_str = evaluate_salary(display_name, content)
                         posted_at = extract_posted_at(job)
-                        if is_valid and record_job(url, title, display_name, "Greenhouse API", loc, sal_str, posted_at):
+                        company_name = extract_company_name(job, display_name)
+                        if is_valid and record_job(url, title, company_name, "Greenhouse API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -137,7 +158,8 @@ def process_ashby_boards() -> int:
                         url, loc = job.get("jobUrl", ""), job.get("locationName", "Remote")
                         is_valid, sal_str = evaluate_salary(display_name, str(job))
                         posted_at = extract_posted_at(job)
-                        if is_valid and record_job(url, title, display_name, "Ashby API", loc, sal_str, posted_at):
+                        company_name = extract_company_name(job, display_name)
+                        if is_valid and record_job(url, title, company_name, "Ashby API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
@@ -155,7 +177,8 @@ def process_lever_boards() -> int:
                         url, loc = job.get("hostedUrl", ""), job.get("categories", {}).get("location", "Remote")
                         is_valid, sal_str = evaluate_salary(display_name, job.get("descriptionPlain", ""))
                         posted_at = extract_posted_at(job)
-                        if is_valid and record_job(url, title, display_name, "Lever API", loc, sal_str, posted_at):
+                        company_name = extract_company_name(job, display_name)
+                        if is_valid and record_job(url, title, company_name, "Lever API", loc, sal_str, posted_at):
                             logging.info(f"[NEW] {display_name}: {title} -> {url}")
                             new_jobs += 1
         except Exception as e: logging.error(f"Error {display_name}: {e}")
