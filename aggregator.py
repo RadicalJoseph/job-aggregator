@@ -188,45 +188,64 @@ def process_lever_boards() -> int:
 
 def process_jobspy_boards() -> int:
     """
-    Executes concurrent scraping across primary job boards using jobspy.
-    Filters the pandas DataFrame output against existing target roles and records matches.
+    Executes concurrent scraping across Indeed and LinkedIn.
+    Splits queries to explicitly target US-based Remote roles 
+    and local roles within a 100-mile radius of Yarmouth, ME.
     """
     new_jobs = 0
-    
-    # Define broad search terms that align with the established TARGET_ROLE_PATTERNS
     search_terms = ["Atlassian Administrator", "Technical Writer", "Knowledge Management", "Systems Analyst"]
     
     for term in search_terms:
         try:
-            # Scrape up to 30 recent remote roles per search term across major boards
-            jobs_df = scrape_jobs(
-                site_name=["linkedin", "indeed", "glassdoor"],
+            # Query 1: Strictly US-based Remote roles
+            df_remote = scrape_jobs(
+                site_name=["linkedin", "indeed"],
                 search_term=term,
-                location="Remote",
-                results_wanted=30
+                location="United States",
+                is_remote=True,
+                results_wanted=15
             )
             
-            # Skip processing if the dataframe is empty or invalid
-            if jobs_df is None or jobs_df.empty:
+            # Query 2: Local radius search
+            df_local = scrape_jobs(
+                site_name=["linkedin", "indeed"],
+                search_term=term,
+                location="Yarmouth, ME",
+                distance=100,
+                results_wanted=15
+            )
+            
+            # Filter out empty dataframes and combine the results
+            frames = [df for df in (df_remote, df_local) if df is not None and not df.empty]
+            if not frames:
                 continue
                 
-            # Iterate through the returned dataframe rows
+            # Merge and drop duplicate URLs found in both queries
+            jobs_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['job_url'])
+            
             for _, row in jobs_df.iterrows():
-                title = str(row.get("title", ""))
+                # Cast title and skip NaN objects
+                title = str(row.get("title", "")) if pd.notna(row.get("title")) else ""
                 
-                # Utilize the existing regex matching logic from aggregator.py
                 if matches_target_role(title):
-                    url = str(row.get("job_url", ""))
-                    company = str(row.get("company", "Unknown"))
-                    loc = str(row.get("location", "Remote"))
-                    description = str(row.get("description", ""))
-                    posted_at = str(row.get("date_posted", ""))
+                    url = str(row.get("job_url", "")) if pd.notna(row.get("job_url")) else ""
+                    company = str(row.get("company", "Unknown")) if pd.notna(row.get("company")) else "Unknown"
+                    loc = str(row.get("location", "Unspecified")) if pd.notna(row.get("location")) else "Unspecified"
+                    description = str(row.get("description", "")) if pd.notna(row.get("description")) else ""
                     site = f"JobSpy ({str(row.get('site', 'Unknown'))})"
                     
-                    # Evaluate salary requirements and conservation status[cite: 2]
+                    # Fix the 'nan' UI bug by explicitly checking for pandas NaN values
+                    raw_date = row.get("date_posted")
+                    posted_at = str(raw_date) if pd.notna(raw_date) else None
+                    
+                    # Inject JobSpy's native numeric salary data into the description 
+                    # so the existing evaluate_salary regex can parse it if it exists
+                    min_sal = row.get("min_amount")
+                    if pd.notna(min_sal) and float(min_sal) > 0:
+                        description += f" ${int(min_sal):,} "
+                    
                     is_valid, sal_str = evaluate_salary(company, description)
                     
-                    # Record the job if it passes validation and does not already exist[cite: 4]
                     if is_valid and record_job(url, title, company, site, loc, sal_str, posted_at):
                         logging.info(f"[NEW] {site}: {title} -> {url}")
                         new_jobs += 1
