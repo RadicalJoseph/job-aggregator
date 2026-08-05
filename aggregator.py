@@ -22,7 +22,10 @@ logging.basicConfig(
 TARGET_ROLE_PATTERNS = [
     r"\btechnical analyst\b", r"\btech analyst\b", r"\bbusiness analyst\b",
     r"\bsoftware analyst\b", r"\btechnical writer\b", r"\bsystems analyst\b",
-    r"\batlassian administrator\b", r"\bjira administrator\b", r"\bitsm specialist\b"
+    r"\batlassian administrator\b", r"\bjira administrator\b", r"\bitsm specialist\b",
+    r"\bai enablement\b", r"\bai\b", r"\btechnology\b", r"\btechnical\b",
+    r"\bdirector\b", r"\bmanager\b", r"\blead\b", r"\bspecialist\b",
+    r"\bprogram manager\b", r"\bknowledge management\b", r"\bknowledge mgmt\b"
 ]
 
 GREENHOUSE_BOARDS = {
