@@ -113,6 +113,34 @@ class DatabaseSchemaTests(unittest.TestCase):
             indexes = conn.execute("PRAGMA index_list(jobs)").fetchall()
             self.assertTrue(any(index[1] == "idx_jobs_url" for index in indexes))
 
+    def test_record_job_updates_existing_row_posted_at(self):
+        database.init_db()
+        inserted = database.record_job(
+            url="https://example.com/job",
+            title="Existing job",
+            company="Acme",
+            source="Source",
+            location="Remote",
+            salary="Unspecified",
+            posted_at=None,
+        )
+        self.assertTrue(inserted)
+
+        updated = database.record_job(
+            url="https://example.com/job",
+            title="Existing job",
+            company="Acme",
+            source="Source",
+            location="Remote",
+            salary="Unspecified",
+            posted_at="2026-08-05T12:00:00Z",
+        )
+        self.assertFalse(updated)
+
+        with sqlite3.connect(database.DB_PATH) as conn:
+            posted_at = conn.execute("SELECT posted_at FROM jobs WHERE url = ?", ("https://example.com/job",)).fetchone()[0]
+            self.assertEqual(posted_at, "2026-08-05T12:00:00Z")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -74,13 +74,18 @@ def record_job(
     salary: Optional[str] = None,
     posted_at: Optional[str] = None,
 ) -> bool:
-    """Insert a newly discovered job record."""
-    if is_job_recorded(url):
-        return False
-
+    """Insert a newly discovered job record or backfill its posting date if it exists."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM jobs WHERE url = ?", (url,))
+        exists = cursor.fetchone() is not None
+        if exists:
+            if posted_at:
+                cursor.execute("UPDATE jobs SET posted_at = ? WHERE url = ?", (posted_at, url))
+                conn.commit()
+            return False
+
         cursor.execute("""
         INSERT INTO jobs (url, title, company, source, location, salary, posted_at, status, discovered_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'New', ?)
@@ -91,7 +96,7 @@ def record_job(
             source,
             location or "Unspecified",
             salary or "Unspecified",
-            posted_at or "Unspecified",
+            posted_at or None,
             datetime.now().isoformat(),
         ))
         conn.commit()
