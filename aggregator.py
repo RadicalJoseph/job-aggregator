@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Optional, Tuple
 from database import init_db, record_job
 from jobspy import scrape_jobs
+from bs4 import BeautifulSoup
+from apify_client import ApifyClient
 
 def extract_company_name(job_payload: dict, fallback: str) -> str:
     """Best-effort extraction of the hiring company from the source payload."""
@@ -52,7 +54,7 @@ TARGET_ROLE_PATTERNS = [
 
 GREENHOUSE_BOARDS = {
     "atlassian": "Atlassian", "scaleai": "Scale AI", "cloverhealth": "Clover Health",
-    "canonical": "Canonical", "github": "GitHub"
+    "canonical": "Canonical", "github": "GitHub", "hiringcafe": "Hiring Cafe", "writefolks": "WriteFolks"
 }
 
 ASHBY_BOARDS = {"harvey": "Harvey", "firecrawl": "Firecrawl"}
@@ -68,6 +70,9 @@ CONSERVATION_ENVIRONMENTAL_TARGETS = [
 ]
 
 MIN_CONSERVATION_SALARY = 80000
+
+# Proxy definition for JobSpy. Replace with valid credentials to bypass Glassdoor/Indeed 400 errors.
+PROXIES = ["http://user:pass@host:port", "http://user:pass@host2:port"]
 
 def matches_target_role(title: str) -> bool:
     for pattern in TARGET_ROLE_PATTERNS:
@@ -201,7 +206,7 @@ def process_lever_boards() -> int:
 
 def process_jobspy_boards() -> int:
     """
-    Executes concurrent scraping across Indeed and LinkedIn.
+    Executes concurrent scraping across multiple platforms including Google Jobs, ZipRecruiter, and Glassdoor.
     Splits queries to explicitly target US-based Remote roles 
     and local roles within a 100-mile radius of Yarmouth, ME.
     Restricts results to established conservation targets.
@@ -211,22 +216,24 @@ def process_jobspy_boards() -> int:
     
     for term in search_terms:
         try:
-            # Query 1: Strictly US-based Remote roles
+            # Query 1: Strictly US-based Remote roles across all supported JobSpy platforms
             df_remote = scrape_jobs(
-                site_name=["linkedin", "indeed"],
+                site_name=["linkedin", "indeed", "google", "zip_recruiter", "glassdoor"],
                 search_term=term,
                 location="United States",
                 is_remote=True,
-                results_wanted=15
+                results_wanted=15,
+                proxies=PROXIES
             )
             
-            # Query 2: Local radius search
+            # Query 2: Local radius search across all supported JobSpy platforms
             df_local = scrape_jobs(
-                site_name=["linkedin", "indeed"],
+                site_name=["linkedin", "indeed", "google", "zip_recruiter", "glassdoor"],
                 search_term=term,
                 location="Yarmouth, ME",
                 distance=100,
-                results_wanted=15
+                results_wanted=15,
+                proxies=PROXIES
             )
             
             # Filter out empty dataframes and strip all-NA columns to prevent concat deprecation warnings
@@ -278,6 +285,91 @@ def process_jobspy_boards() -> int:
             
     return new_jobs
 
+def process_custom_html_boards() -> int:
+    """Requests static HTML from niche boards and parses DOM elements for job data."""
+    new_jobs = 0
+    # Define target URLs for static sites without APIs
+    targets = {
+        "Conservation Job Board": "https://www.conservationjobboard.com/category/conservation-jobs",
+        # Additional custom targets can be mapped here based on site structure
+    }
+    
+    for source, url in targets.items():
+        try:
+            response = requests.get(url, timeout=12)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Note: These class selectors ('job-listing', 'company') are placeholders 
+                # and must be updated to the live DOM structure of each specific site.
+                for job_card in soup.find_all('div', class_='job-listing'):
+                    title_elem = job_card.find('h3')
+                    if not title_elem: continue
+                    title = title_elem.text.strip()
+                    
+                    if matches_target_role(title):
+                        link_elem = job_card.find('a')
+                        link = link_elem['href'] if link_elem else url
+                        
+                        company_elem = job_card.find('span', class_='company')
+                        company = company_elem.text.strip() if company_elem else "Unknown"
+                        
+                        loc_elem = job_card.find('span', class_='location')
+                        loc = loc_elem.text.strip() if loc_elem else "Unspecified"
+                        
+                        time_elem = job_card.find('time')
+                        raw_date = time_elem['datetime'] if time_elem and time_elem.has_attr('datetime') else None
+                        
+                        is_valid, sal_str = evaluate_salary(company, "Unspecified")
+                        
+                        if is_valid and is_recent_enough(raw_date) and record_job(link, title, company, source, loc, sal_str, raw_date):
+                            logging.info(f"[NEW] {source}: {title} -> {link}")
+                            new_jobs += 1
+        except Exception as e:
+            logging.error(f"HTML parsing failed for {source}: {e}")
+            
+    return new_jobs
+
+def process_apify_cloud() -> int:
+    """Triggers specialized Apify cloud actors to extract data from heavily protected enterprise portals."""
+    new_jobs = 0
+    api_token = os.environ.get("APIFY_API_TOKEN")
+    
+    # Abort execution safely if the API key is not present in the environment
+    if not api_token:
+        logging.warning("APIFY_API_TOKEN not found in environment. Skipping Apify extraction.")
+        return new_jobs
+        
+    client = ApifyClient(api_token)
+    
+    # Configure actor input for a generic web scraper targeting an enterprise portal
+    actor_input = {
+        "startUrls": [{"url": "https://amazon.jobs/en/search?base_query=technical+writer"}],
+        "linkSelector": "a.job-link", # Update to match Amazon's live CSS selector
+    }
+    
+    try:
+        # Execute the actor on Apify's infrastructure
+        run = client.actor("apify/web-scraper").call(run_input=actor_input)
+        
+        # Iterate through the structured JSON dataset returned by the actor
+        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
+            title = item.get("title", "")
+            
+            if matches_target_role(title):
+                url = item.get("url", "")
+                company = "Amazon"
+                
+                # Metadata extraction depends entirely on how the Apify actor is configured to return data
+                if record_job(url, title, company, "Apify Cloud", "Unspecified", "Unspecified", None):
+                    logging.info(f"[NEW] Apify ({company}): {title} -> {url}")
+                    new_jobs += 1
+                    
+    except Exception as e:
+        logging.error(f"Apify execution failed: {e}")
+        
+    return new_jobs
+
 def write_refresh_signal() -> None:
     with open(REFRESH_SIGNAL_PATH, "w", encoding="utf-8") as handle:
         handle.write(datetime.now().isoformat())
@@ -286,7 +378,17 @@ def run_aggregator(source: Optional[str] = None):
     trigger_source = source or ("Task Scheduler" if os.environ.get("TASK_SCHEDULER") else "Manual")
     logging.info(f"Starting aggregated job collection cycle via {trigger_source}...")
     init_db()
-    total_found = process_greenhouse_boards() + process_ashby_boards() + process_lever_boards() + process_jobspy_boards()
+    
+    # Execute all distinct aggregation tiers sequentially
+    total_found = (
+        process_greenhouse_boards() + 
+        process_ashby_boards() + 
+        process_lever_boards() + 
+        process_jobspy_boards() +
+        process_custom_html_boards() +
+        process_apify_cloud()
+    )
+    
     logging.info(f"Aggregation complete. Processed {total_found} new qualifying roles.")
     write_refresh_signal()
 
