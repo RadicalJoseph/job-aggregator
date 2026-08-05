@@ -1,8 +1,9 @@
 # aggregator.py
-import re
 import os
+import re
 import logging
 import requests
+import sys
 from datetime import datetime
 from typing import Optional, Tuple
 from database import init_db, record_job
@@ -189,12 +190,16 @@ def write_refresh_signal() -> None:
         handle.write(datetime.now().isoformat())
 
 
-def run_aggregator():
-    logging.info("Starting aggregated job collection cycle...")
+def run_aggregator(source: Optional[str] = None):
+    trigger_source = source or ("Task Scheduler" if os.environ.get("TASK_SCHEDULER") else "Manual")
+    logging.info(f"Starting aggregated job collection cycle via {trigger_source}...")
     init_db()
     total_found = process_greenhouse_boards() + process_ashby_boards() + process_lever_boards()
     logging.info(f"Aggregation complete. Processed {total_found} new qualifying roles.")
     write_refresh_signal()
 
 if __name__ == "__main__":
-    run_aggregator()
+    source = None
+    if len(sys.argv) > 1:
+        source = sys.argv[1]
+    run_aggregator(source)

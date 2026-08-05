@@ -83,7 +83,7 @@ def run_aggregator_and_refresh(tree, text_widget, filter_text=None, sort_state=N
     if not os.path.exists(python_executable):
         python_executable = "python"
 
-    subprocess.run([python_executable, os.path.join(os.path.dirname(__file__), "aggregator.py")], check=False)
+    subprocess.run([python_executable, os.path.join(os.path.dirname(__file__), "aggregator.py"), "Manual"], check=False)
     refresh_data(tree, text_widget, filter_text, sort_state)
 
 

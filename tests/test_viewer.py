@@ -59,7 +59,8 @@ class ViewerRefreshTests(unittest.TestCase):
             viewer.run_aggregator_and_refresh(fake_tree, fake_text, filter_text="engineer", sort_state=sort_state)
 
         self.assertEqual(run_mock.call_count, 1)
-        self.assertTrue(run_mock.call_args[0][0][-1].endswith("aggregator.py"))
+        self.assertTrue(run_mock.call_args[0][0][-2].endswith("aggregator.py"))
+        self.assertEqual(run_mock.call_args[0][0][-1], "Manual")
         refresh_mock.assert_called_once_with(fake_tree, fake_text, "engineer", sort_state)
 
     def test_refresh_applies_existing_sort_state(self):
