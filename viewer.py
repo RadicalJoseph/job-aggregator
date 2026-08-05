@@ -1,4 +1,5 @@
 # viewer.py
+import subprocess
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import os
@@ -72,6 +73,15 @@ def get_refresh_marker_time():
     if not os.path.exists(REFRESH_SIGNAL_PATH):
         return None
     return os.path.getmtime(REFRESH_SIGNAL_PATH)
+
+
+def run_aggregator_and_refresh(tree, text_widget, filter_text=None, sort_state=None):
+    python_executable = os.path.join(os.path.dirname(__file__), "venv", "Scripts", "python.exe")
+    if not os.path.exists(python_executable):
+        python_executable = "python"
+
+    subprocess.run([python_executable, os.path.join(os.path.dirname(__file__), "aggregator.py")], check=False)
+    refresh_data(tree, text_widget, filter_text, sort_state)
 
 
 def watch_for_refresh(tree, text_widget, last_seen_time, root, already_consumed=False, filter_getter=None, sort_state=None):
@@ -202,7 +212,7 @@ def main():
 
     control_frame = ttk.Frame(root)
     control_frame.pack(fill='x', padx=10, pady=(0, 10))
-    refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: refresh_data(tree, log_text, filter_var.get(), sort_state))
+    refresh_btn = ttk.Button(control_frame, text="Refresh Data", command=lambda: run_aggregator_and_refresh(tree, log_text, filter_var.get(), sort_state))
     refresh_btn.pack(side=tk.LEFT)
     hint_label = ttk.Label(control_frame, text="Double-click row to copy URL | Click status box to toggle checkmark.")
     hint_label.pack(side=tk.RIGHT)

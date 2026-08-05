@@ -1,6 +1,6 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
-import tkinter as tk
 import viewer
 
 
@@ -50,6 +50,18 @@ class FakeTree:
 
 
 class ViewerRefreshTests(unittest.TestCase):
+    def test_run_aggregator_and_refresh_invokes_aggregator(self):
+        fake_tree = FakeTree()
+        fake_text = FakeTextWidget()
+        sort_state = {"column": "Title", "reverse": False}
+
+        with patch("viewer.subprocess.run", return_value=SimpleNamespace(returncode=0)) as run_mock, patch("viewer.refresh_data") as refresh_mock:
+            viewer.run_aggregator_and_refresh(fake_tree, fake_text, filter_text="engineer", sort_state=sort_state)
+
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertTrue(run_mock.call_args[0][0][-1].endswith("aggregator.py"))
+        refresh_mock.assert_called_once_with(fake_tree, fake_text, "engineer", sort_state)
+
     def test_refresh_applies_existing_sort_state(self):
         fake_tree = FakeTree()
         fake_text = FakeTextWidget()
