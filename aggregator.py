@@ -4,10 +4,11 @@ import re
 import logging
 import requests
 import sys
+import pandas as pd
 from datetime import datetime
 from typing import Optional, Tuple
 from database import init_db, record_job
-
+from jobspy import scrape_jobs
 
 def extract_company_name(job_payload: dict, fallback: str) -> str:
     """Best-effort extraction of the hiring company from the source payload."""
@@ -185,6 +186,56 @@ def process_lever_boards() -> int:
         except Exception as e: logging.error(f"Error {display_name}: {e}")
     return new_jobs
 
+def process_jobspy_boards() -> int:
+    """
+    Executes concurrent scraping across primary job boards using jobspy.
+    Filters the pandas DataFrame output against existing target roles and records matches.
+    """
+    new_jobs = 0
+    
+    # Define broad search terms that align with the established TARGET_ROLE_PATTERNS
+    search_terms = ["Atlassian Administrator", "Technical Writer", "Knowledge Management", "Systems Analyst"]
+    
+    for term in search_terms:
+        try:
+            # Scrape up to 30 recent remote roles per search term across major boards
+            jobs_df = scrape_jobs(
+                site_name=["linkedin", "indeed", "glassdoor"],
+                search_term=term,
+                location="Remote",
+                results_wanted=30
+            )
+            
+            # Skip processing if the dataframe is empty or invalid
+            if jobs_df is None or jobs_df.empty:
+                continue
+                
+            # Iterate through the returned dataframe rows
+            for _, row in jobs_df.iterrows():
+                title = str(row.get("title", ""))
+                
+                # Utilize the existing regex matching logic from aggregator.py
+                if matches_target_role(title):
+                    url = str(row.get("job_url", ""))
+                    company = str(row.get("company", "Unknown"))
+                    loc = str(row.get("location", "Remote"))
+                    description = str(row.get("description", ""))
+                    posted_at = str(row.get("date_posted", ""))
+                    site = f"JobSpy ({str(row.get('site', 'Unknown'))})"
+                    
+                    # Evaluate salary requirements and conservation status[cite: 2]
+                    is_valid, sal_str = evaluate_salary(company, description)
+                    
+                    # Record the job if it passes validation and does not already exist[cite: 4]
+                    if is_valid and record_job(url, title, company, site, loc, sal_str, posted_at):
+                        logging.info(f"[NEW] {site}: {title} -> {url}")
+                        new_jobs += 1
+                        
+        except Exception as e:
+            logging.error(f"Error executing JobSpy for term '{term}': {e}")
+            
+    return new_jobs
+
 def write_refresh_signal() -> None:
     with open(REFRESH_SIGNAL_PATH, "w", encoding="utf-8") as handle:
         handle.write(datetime.now().isoformat())
@@ -194,7 +245,7 @@ def run_aggregator(source: Optional[str] = None):
     trigger_source = source or ("Task Scheduler" if os.environ.get("TASK_SCHEDULER") else "Manual")
     logging.info(f"Starting aggregated job collection cycle via {trigger_source}...")
     init_db()
-    total_found = process_greenhouse_boards() + process_ashby_boards() + process_lever_boards()
+    total_found = process_greenhouse_boards() + process_ashby_boards() + process_lever_boards() + process_jobspy_boards()
     logging.info(f"Aggregation complete. Processed {total_found} new qualifying roles.")
     write_refresh_signal()
 
