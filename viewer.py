@@ -66,7 +66,10 @@ def refresh_data(tree, text_widget, filter_text=None, sort_state=None):
         
     text_widget.config(state=tk.NORMAL)
     text_widget.delete(1.0, tk.END)
-    text_widget.insert(tk.END, read_log_file())
+    log_text = read_log_file()
+    if log_text:
+        lines = log_text.splitlines()
+        text_widget.insert(tk.END, "\n".join(reversed(lines)))
     text_widget.config(state=tk.DISABLED)
 
 def get_refresh_marker_time():
