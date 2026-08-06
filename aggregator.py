@@ -5,32 +5,12 @@ import logging
 import requests
 import sys
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from database import init_db, record_job
 from jobspy import scrape_jobs
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
-
-
-def extract_company_name(job_payload: dict, fallback: str) -> str:
-    """Best-effort extraction of the hiring company from the source payload."""
-    if not isinstance(job_payload, dict):
-        return fallback
-
-    for key in ("companyName", "company", "employer", "organization", "hiringCompany"):
-        value = job_payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    nested = job_payload.get("company")
-    if isinstance(nested, dict):
-        for key in ("name", "companyName", "title"):
-            value = nested.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-
-    return fallback
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 if not os.path.exists(DATA_DIR):
@@ -61,8 +41,6 @@ GREENHOUSE_BOARDS = {
 ASHBY_BOARDS = {"harvey": "Harvey", "firecrawl": "Firecrawl"}
 LEVER_BOARDS = {"netflix": "Netflix"}
 
-PROXIES = None
-
 CONSERVATION_ENVIRONMENTAL_TARGETS = [
     "Climatebase", "Conservation International (CI)", "Conservation Job Board",
     "Environmental Defense Fund (EDF)", "Green Jobs Network", "Land Trust Alliance Job Board",
@@ -73,6 +51,24 @@ CONSERVATION_ENVIRONMENTAL_TARGETS = [
 ]
 
 MIN_CONSERVATION_SALARY = 80000
+
+# Set PROXIES to None for direct execution using local IP
+PROXIES = None
+
+def extract_company_name(job_payload: dict, fallback: str) -> str:
+    if not isinstance(job_payload, dict):
+        return fallback
+    for key in ("companyName", "company", "employer", "organization", "hiringCompany"):
+        value = job_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = job_payload.get("company")
+    if isinstance(nested, dict):
+        for key in ("name", "companyName", "title"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return fallback
 
 def matches_target_role(title: str) -> bool:
     for pattern in TARGET_ROLE_PATTERNS:
@@ -89,20 +85,14 @@ def parse_salary_floor(text: str) -> Optional[int]:
     return None
 
 def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
-    """Parses salary and enforces a global minimum threshold."""
     floor = parse_salary_floor(text)
     salary_str = f"${floor:,}" if floor else "Unspecified"
-
     if floor is not None and floor < MIN_CONSERVATION_SALARY:
         return (False, salary_str)
-        
     return (True, salary_str)
 
 def is_recent_enough(posted_at: Optional[str]) -> bool:
-    """Evaluates if a parsed date string falls within the last 7 days."""
-    if not posted_at:
-        return True 
-    
+    if not posted_at: return True 
     try:
         dt = pd.to_datetime(posted_at, utc=True)
         cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=7)
@@ -112,37 +102,46 @@ def is_recent_enough(posted_at: Optional[str]) -> bool:
         return True 
 
 def extract_posted_at(job_payload: dict) -> Optional[str]:
-    """Best-effort extraction of a source-provided posting date from nested payloads."""
-    if not isinstance(job_payload, dict):
-        return None
-
+    if not isinstance(job_payload, dict): return None
     candidates = []
-
     def walk(value):
         if isinstance(value, dict):
             for key, nested_value in value.items():
                 lowered = key.lower()
                 if lowered in {"postedat", "posted_at", "createdat", "dateposted", "publishedat", "updatedat", "lastupdated"}:
-                    if nested_value:
-                        candidates.append(str(nested_value))
-                elif isinstance(nested_value, (dict, list)):
-                    walk(nested_value)
+                    if nested_value: candidates.append(str(nested_value))
+                elif isinstance(nested_value, (dict, list)): walk(nested_value)
         elif isinstance(value, list):
-            for item in value:
-                walk(item)
-
+            for item in value: walk(item)
     walk(job_payload)
-
     for key in ("postedAt", "posted_at", "createdAt", "datePosted", "publishedAt", "updatedAt", "lastUpdated"):
-        if key in job_payload:
-            value = job_payload.get(key)
-            if value:
-                return str(value)
-
+        if key in job_payload and job_payload.get(key):
+            return str(job_payload.get(key))
     for value in candidates:
-        if value:
-            return value
+        if value: return value
+    return None
 
+def parse_relative_date(text: str) -> Optional[str]:
+    """Converts relative strings like 'Posted 9 days ago' into ISO date strings (YYYY-MM-DD)."""
+    if not text:
+        return None
+    
+    text_clean = text.lower().strip()
+    now = datetime.now()
+    
+    match = re.search(r'(\d+)\s*(hour|day|week|month)s?\s*ago', text_clean)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit == 'hour': dt = now - timedelta(hours=amount)
+        elif unit == 'day': dt = now - timedelta(days=amount)
+        elif unit == 'week': dt = now - timedelta(weeks=amount)
+        elif unit == 'month': dt = now - timedelta(days=amount * 30)
+        return dt.strftime('%Y-%m-%d')
+    
+    if "today" in text_clean or "just posted" in text_clean:
+        return now.strftime('%Y-%m-%d')
+        
     return None
 
 def process_greenhouse_boards() -> int:
@@ -203,46 +202,36 @@ def process_lever_boards() -> int:
     return new_jobs
 
 def process_jobspy_boards() -> int:
-    """
-    Executes concurrent scraping across supported platforms without proxy dependencies.
-    Restricts target sites to those that perform reliably on standard residential IPs.
-    """
     new_jobs = 0
     search_terms = ["Atlassian Administrator", "Technical Writer", "Knowledge Management", "Systems Analyst"]
-    
-    # Exclude glassdoor from site_name to avoid HTTP 400 bot blocks on local IPs
-    target_sites = ["linkedin", "indeed", "google", "zip_recruiter"]
+    target_sites = ["linkedin", "indeed", "google"] 
     
     for term in search_terms:
         try:
-            # Query 1: Strictly US-based Remote roles
             df_remote = scrape_jobs(
                 site_name=target_sites,
                 search_term=term,
                 location="United States",
                 is_remote=True,
                 results_wanted=15,
-                proxies=PROXIES  # Evaluates to None
+                proxies=PROXIES
             )
             
-            # Query 2: Local radius search
             df_local = scrape_jobs(
                 site_name=target_sites,
                 search_term=term,
                 location="Yarmouth, ME",
                 distance=100,
                 results_wanted=15,
-                proxies=PROXIES  # Evaluates to None
+                proxies=PROXIES
             )
             
-            # Filter empty dataframes and drop all-NA columns
             frames = [
                 df.dropna(how='all', axis=1) 
                 for df in (df_remote, df_local) 
                 if df is not None and not df.empty
             ]
-            if not frames:
-                continue
+            if not frames: continue
                 
             jobs_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['job_url'])
             
@@ -277,18 +266,15 @@ def process_jobspy_boards() -> int:
     return new_jobs
 
 def process_custom_html_boards() -> int:
-    """Requests static HTML from niche boards and parses DOM elements for job data."""
     new_jobs = 0
     targets = {
         "Conservation Job Board": "https://www.conservationjobboard.com/category/conservation-jobs",
     }
-    
     for source, url in targets.items():
         try:
             response = requests.get(url, timeout=12)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
-                
                 for job_card in soup.find_all('div', class_='job-listing'):
                     title_elem = job_card.find('h3')
                     if not title_elem: continue
@@ -314,15 +300,28 @@ def process_custom_html_boards() -> int:
                             new_jobs += 1
         except Exception as e:
             logging.error(f"HTML parsing failed for {source}: {e}")
-            
     return new_jobs
 
 def process_playwright_boards() -> int:
     """Uses a local headless browser to render JavaScript-heavy enterprise boards."""
     new_jobs = 0
-    
     targets = {
-        "Amazon": "https://www.amazon.jobs/en/search?base_query=technical+writer",
+        "Amazon": {
+            "url": "https://www.amazon.jobs/en/search?base_query=technical+writer",
+            "card": ".job-tile",
+            "title": ".job-title",
+            "link": "a.job-link",
+            "location": ".location-and-id",
+            "date": None
+        },
+        "ZipRecruiter": {
+            "url": "https://www.ziprecruiter.com/jobs-search?search=technical+writer&location=Remote",
+            "card": 'article[id^="job-card"]', 
+            "title": "h2",     
+            "link": "button",
+            "location": 'p:has([data-testid="job-card-location"])',
+            "date": 'p:has-text("Posted")'
+        }
     }
     
     try:
@@ -330,46 +329,51 @@ def process_playwright_boards() -> int:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             
-            for source, url in targets.items():
+            for source, config in targets.items():
                 try:
-                    page.goto(url, timeout=15000, wait_until="networkidle")
-                    job_cards = page.locator('.job-tile').all()
+                    page.goto(config["url"], timeout=15000, wait_until="networkidle")
+                    job_cards = page.locator(config["card"]).all()
                     
                     for card in job_cards:
-                        title_loc = card.locator('.job-title')
-                        if title_loc.count() == 0:
-                            continue
+                        title_loc = card.locator(config["title"])
+                        if title_loc.count() == 0: continue
                         title = title_loc.inner_text().strip()
                         
                         if matches_target_role(title):
-                            link_suffix = card.locator('a.job-link').get_attribute('href')
-                            link = f"https://www.amazon.jobs{link_suffix}" if link_suffix else url
+                            link_elem = card.locator(config["link"])
+                            link_suffix = link_elem.get_attribute('href') if link_elem.count() > 0 else None
                             
-                            # Target Amazon's live CSS class for location metadata
-                            loc_elem = card.locator('.location-and-id')
+                            if source == "Amazon" and link_suffix and link_suffix.startswith("/"):
+                                link = f"https://www.amazon.jobs{link_suffix}"
+                            else:
+                                link = link_suffix or config["url"]
+                            
+                            loc_elem = card.locator(config["location"])
                             if loc_elem.count() > 0:
                                 raw_loc = loc_elem.inner_text().strip()
-                                # Extract location prior to the Job ID pipe delimiter (|)
                                 loc = raw_loc.split('|')[0].strip() if '|' in raw_loc else raw_loc
                             else:
                                 loc = "Remote / Unspecified"
+                                
+                            posted_at = None
+                            if config.get("date"):
+                                date_elem = card.locator(config["date"])
+                                if date_elem.count() > 0:
+                                    raw_date_text = date_elem.inner_text().strip()
+                                    posted_at = parse_relative_date(raw_date_text)
                             
-                            # Evaluate salary across card text content
                             card_text = card.inner_text()
                             is_valid, sal_str = evaluate_salary(source, card_text)
                             
-                            if is_valid and record_job(link, title, source, "Playwright", loc, sal_str, None):
+                            if is_valid and is_recent_enough(posted_at) and record_job(link, title, source, "Playwright", loc, sal_str, posted_at):
                                 logging.info(f"[NEW] {source}: {title} -> {link}")
                                 new_jobs += 1
                                 
                 except Exception as e:
                     logging.error(f"Playwright failed to process {source}: {e}")
-                    
             browser.close()
-            
     except Exception as e:
         logging.error(f"Playwright execution failed: {e}")
-        
     return new_jobs
 
 def write_refresh_signal() -> None:
@@ -395,6 +399,5 @@ def run_aggregator(source: Optional[str] = None):
 
 if __name__ == "__main__":
     source = None
-    if len(sys.argv) > 1:
-        source = sys.argv[1]
+    if len(sys.argv) > 1: source = sys.argv[1]
     run_aggregator(source)
