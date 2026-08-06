@@ -331,7 +331,7 @@ def process_playwright_boards() -> int:
             
             for source, config in targets.items():
                 try:
-                    page.goto(config["url"], timeout=15000, wait_until="networkidle")
+                    page.goto(config["url"], timeout=30000, wait_until="domcontentloaded")
                     job_cards = page.locator(config["card"]).all()
                     
                     for card in job_cards:
