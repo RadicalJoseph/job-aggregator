@@ -12,6 +12,7 @@ from jobspy import scrape_jobs
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+
 def extract_company_name(job_payload: dict, fallback: str) -> str:
     """Best-effort extraction of the hiring company from the source payload."""
     if not isinstance(job_payload, dict):
@@ -60,6 +61,8 @@ GREENHOUSE_BOARDS = {
 ASHBY_BOARDS = {"harvey": "Harvey", "firecrawl": "Firecrawl"}
 LEVER_BOARDS = {"netflix": "Netflix"}
 
+PROXIES = None
+
 CONSERVATION_ENVIRONMENTAL_TARGETS = [
     "Climatebase", "Conservation International (CI)", "Conservation Job Board",
     "Environmental Defense Fund (EDF)", "Green Jobs Network", "Land Trust Alliance Job Board",
@@ -70,9 +73,6 @@ CONSERVATION_ENVIRONMENTAL_TARGETS = [
 ]
 
 MIN_CONSERVATION_SALARY = 80000
-
-# Proxy definition for JobSpy. Replace with valid credentials to bypass Glassdoor/Indeed 400 errors.
-PROXIES = ["http://user:pass@host:port", "http://user:pass@host2:port"]
 
 def matches_target_role(title: str) -> bool:
     for pattern in TARGET_ROLE_PATTERNS:
@@ -204,34 +204,38 @@ def process_lever_boards() -> int:
 
 def process_jobspy_boards() -> int:
     """
-    Executes concurrent scraping across multiple platforms including Google Jobs, ZipRecruiter, and Glassdoor.
-    Splits queries to explicitly target US-based Remote roles 
-    and local roles within a 100-mile radius of Yarmouth, ME.
-    Restricts results to established conservation targets.
+    Executes concurrent scraping across supported platforms without proxy dependencies.
+    Restricts target sites to those that perform reliably on standard residential IPs.
     """
     new_jobs = 0
     search_terms = ["Atlassian Administrator", "Technical Writer", "Knowledge Management", "Systems Analyst"]
     
+    # Exclude glassdoor from site_name to avoid HTTP 400 bot blocks on local IPs
+    target_sites = ["linkedin", "indeed", "google", "zip_recruiter"]
+    
     for term in search_terms:
         try:
+            # Query 1: Strictly US-based Remote roles
             df_remote = scrape_jobs(
-                site_name=["linkedin", "indeed", "google", "zip_recruiter", "glassdoor"],
+                site_name=target_sites,
                 search_term=term,
                 location="United States",
                 is_remote=True,
                 results_wanted=15,
-                proxies=PROXIES
+                proxies=PROXIES  # Evaluates to None
             )
             
+            # Query 2: Local radius search
             df_local = scrape_jobs(
-                site_name=["linkedin", "indeed", "google", "zip_recruiter", "glassdoor"],
+                site_name=target_sites,
                 search_term=term,
                 location="Yarmouth, ME",
                 distance=100,
                 results_wanted=15,
-                proxies=PROXIES
+                proxies=PROXIES  # Evaluates to None
             )
             
+            # Filter empty dataframes and drop all-NA columns
             frames = [
                 df.dropna(how='all', axis=1) 
                 for df in (df_remote, df_local) 
@@ -332,16 +336,27 @@ def process_playwright_boards() -> int:
                     job_cards = page.locator('.job-tile').all()
                     
                     for card in job_cards:
-                        title = card.locator('.job-title').inner_text().strip()
+                        title_loc = card.locator('.job-title')
+                        if title_loc.count() == 0:
+                            continue
+                        title = title_loc.inner_text().strip()
                         
                         if matches_target_role(title):
                             link_suffix = card.locator('a.job-link').get_attribute('href')
                             link = f"https://www.amazon.jobs{link_suffix}" if link_suffix else url
                             
-                            loc_count = card.locator('.location').count()
-                            loc = card.locator('.location').inner_text().strip() if loc_count > 0 else "Unspecified"
+                            # Target Amazon's live CSS class for location metadata
+                            loc_elem = card.locator('.location-and-id')
+                            if loc_elem.count() > 0:
+                                raw_loc = loc_elem.inner_text().strip()
+                                # Extract location prior to the Job ID pipe delimiter (|)
+                                loc = raw_loc.split('|')[0].strip() if '|' in raw_loc else raw_loc
+                            else:
+                                loc = "Remote / Unspecified"
                             
-                            is_valid, sal_str = evaluate_salary(source, "Unspecified")
+                            # Evaluate salary across card text content
+                            card_text = card.inner_text()
+                            is_valid, sal_str = evaluate_salary(source, card_text)
                             
                             if is_valid and record_job(link, title, source, "Playwright", loc, sal_str, None):
                                 logging.info(f"[NEW] {source}: {title} -> {link}")
