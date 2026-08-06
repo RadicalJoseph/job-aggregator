@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 from database import init_db, record_job
 from jobspy import scrape_jobs
 from bs4 import BeautifulSoup
-from apify_client import ApifyClient
+from playwright.sync_api import sync_playwright
 
 def extract_company_name(job_payload: dict, fallback: str) -> str:
     """Best-effort extraction of the hiring company from the source payload."""
@@ -93,7 +93,6 @@ def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
     floor = parse_salary_floor(text)
     salary_str = f"${floor:,}" if floor else "Unspecified"
 
-    # Reject any role where the parsed salary falls below the minimum
     if floor is not None and floor < MIN_CONSERVATION_SALARY:
         return (False, salary_str)
         
@@ -102,16 +101,15 @@ def evaluate_salary(company_or_source: str, text: str) -> Tuple[bool, str]:
 def is_recent_enough(posted_at: Optional[str]) -> bool:
     """Evaluates if a parsed date string falls within the last 7 days."""
     if not posted_at:
-        return True  # Include jobs with missing dates to prevent false negatives
+        return True 
     
     try:
-        # Leverage pandas' robust datetime parser to handle varying API formats
         dt = pd.to_datetime(posted_at, utc=True)
         cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=7)
         return dt >= cutoff
     except Exception as e:
         logging.debug(f"Date parsing failed for '{posted_at}': {e}")
-        return True  # Default to inclusion on parse failure
+        return True 
 
 def extract_posted_at(job_payload: dict) -> Optional[str]:
     """Best-effort extraction of a source-provided posting date from nested payloads."""
@@ -216,7 +214,6 @@ def process_jobspy_boards() -> int:
     
     for term in search_terms:
         try:
-            # Query 1: Strictly US-based Remote roles across all supported JobSpy platforms
             df_remote = scrape_jobs(
                 site_name=["linkedin", "indeed", "google", "zip_recruiter", "glassdoor"],
                 search_term=term,
@@ -226,7 +223,6 @@ def process_jobspy_boards() -> int:
                 proxies=PROXIES
             )
             
-            # Query 2: Local radius search across all supported JobSpy platforms
             df_local = scrape_jobs(
                 site_name=["linkedin", "indeed", "google", "zip_recruiter", "glassdoor"],
                 search_term=term,
@@ -236,7 +232,6 @@ def process_jobspy_boards() -> int:
                 proxies=PROXIES
             )
             
-            # Filter out empty dataframes and strip all-NA columns to prevent concat deprecation warnings
             frames = [
                 df.dropna(how='all', axis=1) 
                 for df in (df_remote, df_local) 
@@ -245,37 +240,29 @@ def process_jobspy_boards() -> int:
             if not frames:
                 continue
                 
-            # Merge and drop duplicate URLs found in both queries
             jobs_df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['job_url'])
             
-            # Iterate through the returned dataframe rows
             for _, row in jobs_df.iterrows():
-                # Cast title and skip NaN objects
                 title = str(row.get("title", "")) if pd.notna(row.get("title")) else ""
                 company = str(row.get("company", "Unknown")) if pd.notna(row.get("company")) else "Unknown"
                 
-                # Enforce the conservation target list for JobSpy results
                 is_conservation = any(t.lower() in company.lower() for t in CONSERVATION_ENVIRONMENTAL_TARGETS)
                 
-                # Proceed only if the role matches target patterns and the company is a conservation target
                 if matches_target_role(title) and is_conservation:
                     url = str(row.get("job_url", "")) if pd.notna(row.get("job_url")) else ""
                     loc = str(row.get("location", "Unspecified")) if pd.notna(row.get("location")) else "Unspecified"
                     description = str(row.get("description", "")) if pd.notna(row.get("description")) else ""
                     site = f"JobSpy ({str(row.get('site', 'Unknown'))})"
                     
-                    # Prevent 'nan' strings from entering the database
                     raw_date = row.get("date_posted")
                     posted_at = str(raw_date) if pd.notna(raw_date) else None
                     
-                    # Inject parsed JobSpy salary into description for regex evaluation
                     min_sal = row.get("min_amount")
                     if pd.notna(min_sal) and float(min_sal) > 0:
                         description += f" ${int(min_sal):,} "
                     
                     is_valid, sal_str = evaluate_salary(company, description)
                     
-                    # Add the 7-day window filter before recording
                     if is_valid and is_recent_enough(posted_at) and record_job(url, title, company, site, loc, sal_str, posted_at):
                         logging.info(f"[NEW] {site}: {title} -> {url}")
                         new_jobs += 1
@@ -288,10 +275,8 @@ def process_jobspy_boards() -> int:
 def process_custom_html_boards() -> int:
     """Requests static HTML from niche boards and parses DOM elements for job data."""
     new_jobs = 0
-    # Define target URLs for static sites without APIs
     targets = {
         "Conservation Job Board": "https://www.conservationjobboard.com/category/conservation-jobs",
-        # Additional custom targets can be mapped here based on site structure
     }
     
     for source, url in targets.items():
@@ -300,8 +285,6 @@ def process_custom_html_boards() -> int:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Note: These class selectors ('job-listing', 'company') are placeholders 
-                # and must be updated to the live DOM structure of each specific site.
                 for job_card in soup.find_all('div', class_='job-listing'):
                     title_elem = job_card.find('h3')
                     if not title_elem: continue
@@ -330,43 +313,47 @@ def process_custom_html_boards() -> int:
             
     return new_jobs
 
-def process_apify_cloud() -> int:
-    """Triggers specialized Apify cloud actors to extract data from heavily protected enterprise portals."""
+def process_playwright_boards() -> int:
+    """Uses a local headless browser to render JavaScript-heavy enterprise boards."""
     new_jobs = 0
-    api_token = os.environ.get("APIFY_API_TOKEN")
     
-    # Abort execution safely if the API key is not present in the environment
-    if not api_token:
-        logging.warning("APIFY_API_TOKEN not found in environment. Skipping Apify extraction.")
-        return new_jobs
-        
-    client = ApifyClient(api_token)
-    
-    # Configure actor input for a generic web scraper targeting an enterprise portal
-    actor_input = {
-        "startUrls": [{"url": "https://amazon.jobs/en/search?base_query=technical+writer"}],
-        "linkSelector": "a.job-link", # Update to match Amazon's live CSS selector
+    targets = {
+        "Amazon": "https://www.amazon.jobs/en/search?base_query=technical+writer",
     }
     
     try:
-        # Execute the actor on Apify's infrastructure
-        run = client.actor("apify/web-scraper").call(run_input=actor_input)
-        
-        # Iterate through the structured JSON dataset returned by the actor
-        for item in client.dataset(run["defaultDatasetId"]).iterate_items():
-            title = item.get("title", "")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
             
-            if matches_target_role(title):
-                url = item.get("url", "")
-                company = "Amazon"
-                
-                # Metadata extraction depends entirely on how the Apify actor is configured to return data
-                if record_job(url, title, company, "Apify Cloud", "Unspecified", "Unspecified", None):
-                    logging.info(f"[NEW] Apify ({company}): {title} -> {url}")
-                    new_jobs += 1
+            for source, url in targets.items():
+                try:
+                    page.goto(url, timeout=15000, wait_until="networkidle")
+                    job_cards = page.locator('.job-tile').all()
                     
+                    for card in job_cards:
+                        title = card.locator('.job-title').inner_text().strip()
+                        
+                        if matches_target_role(title):
+                            link_suffix = card.locator('a.job-link').get_attribute('href')
+                            link = f"https://www.amazon.jobs{link_suffix}" if link_suffix else url
+                            
+                            loc_count = card.locator('.location').count()
+                            loc = card.locator('.location').inner_text().strip() if loc_count > 0 else "Unspecified"
+                            
+                            is_valid, sal_str = evaluate_salary(source, "Unspecified")
+                            
+                            if is_valid and record_job(link, title, source, "Playwright", loc, sal_str, None):
+                                logging.info(f"[NEW] {source}: {title} -> {link}")
+                                new_jobs += 1
+                                
+                except Exception as e:
+                    logging.error(f"Playwright failed to process {source}: {e}")
+                    
+            browser.close()
+            
     except Exception as e:
-        logging.error(f"Apify execution failed: {e}")
+        logging.error(f"Playwright execution failed: {e}")
         
     return new_jobs
 
@@ -379,14 +366,13 @@ def run_aggregator(source: Optional[str] = None):
     logging.info(f"Starting aggregated job collection cycle via {trigger_source}...")
     init_db()
     
-    # Execute all distinct aggregation tiers sequentially
     total_found = (
         process_greenhouse_boards() + 
         process_ashby_boards() + 
         process_lever_boards() + 
         process_jobspy_boards() +
         process_custom_html_boards() +
-        process_apify_cloud()
+        process_playwright_boards()
     )
     
     logging.info(f"Aggregation complete. Processed {total_found} new qualifying roles.")
